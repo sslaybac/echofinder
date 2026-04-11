@@ -7,6 +7,7 @@ from PyQt6.QtGui import QKeyEvent
 from PyQt6.QtWidgets import QApplication, QMenu, QTreeView
 
 from echofinder.models.file_node import FileNode
+from echofinder.ui.node_delegate import NodeIndicatorDelegate
 from echofinder.ui.tree_model import FileTreeModel
 
 
@@ -22,6 +23,9 @@ class FileTreeView(QTreeView):
         self.setUniformRowHeights(True)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
+        # Install the four-slot indicator delegate
+        self._indicator_delegate = NodeIndicatorDelegate(self)
+        self.setItemDelegate(self._indicator_delegate)
 
     # ------------------------------------------------------------------
     # Keyboard navigation (US-015)

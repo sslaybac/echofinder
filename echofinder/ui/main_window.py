@@ -160,7 +160,7 @@ class MainWindow(QMainWindow):
             self._hashing_engine.cancel()
             self._hashing_engine.wait(5000)
 
-        # Disconnect old expansion signals if a model already exists
+        # Disconnect old model's signals before discarding it
         if self._tree_model is not None:
             try:
                 self._tree_view.expanded.disconnect(self._save_expansion_state)
@@ -170,9 +170,14 @@ class MainWindow(QMainWindow):
                 )
             except RuntimeError:
                 pass
+            try:
+                self._hashing_engine.file_hashed.disconnect(self._tree_model.on_file_hashed)
+            except (RuntimeError, TypeError):
+                pass
 
-        # Build new model
+        # Build new model and wire it to the hashing engine
         self._tree_model = FileTreeModel(self._resolver)
+        self._hashing_engine.file_hashed.connect(self._tree_model.on_file_hashed)
         self._tree_model.set_root(path)
         self._tree_view.setModel(self._tree_model)
 
@@ -281,6 +286,8 @@ class MainWindow(QMainWindow):
     def _on_selection_changed(self, current: QModelIndex, _previous: QModelIndex) -> None:
         if not current.isValid():
             self._preview_stack.setCurrentIndex(_PREVIEW_EMPTY)
+            if self._tree_model is not None:
+                self._tree_model.set_active_file(None)
             return
         node = current.internalPointer()
         self._selection_label.setText(
@@ -288,6 +295,14 @@ class MainWindow(QMainWindow):
             f"<span style='color: gray;'>{node.path}</span>"
         )
         self._preview_stack.setCurrentIndex(_PREVIEW_SELECTION)
+
+        # Notify model so it can set DUPLICATE_SPECIFIC on matching nodes.
+        # Folders, symlinks, and dirs are not hashed — clear specific indicators.
+        if self._tree_model is not None:
+            if not node.is_dir and not node.is_symlink:
+                self._tree_model.set_active_file(str(node.path))
+            else:
+                self._tree_model.set_active_file(None)
 
     def _on_file_selected(self, path: Path) -> None:
         # Enter key on a file — preview pane already updated via currentChanged

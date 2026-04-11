@@ -18,13 +18,49 @@ class FileType(Enum):
     UNKNOWN = auto()
 
 
+class OwnershipState(Enum):
+    """Slot 2: who owns this filesystem entry relative to the current user."""
+    INDIVIDUAL = auto()  # current user is the individual (UID) owner
+    GROUP = auto()       # current user belongs to the owning group (not individual owner)
+    NEITHER = auto()     # current user is neither individual owner nor in owning group
+
+
+class PermissionState(Enum):
+    """Slot 3: current user's effective read/write access to this entry."""
+    READ_WRITE = auto()   # readable and writable
+    READ_ONLY = auto()    # readable but not writable
+    NOT_READABLE = auto() # not readable (includes write-only; padlock shown)
+
+
+class HashState(Enum):
+    """Slot 4: hashing/duplicate status.
+
+    States are mutually exclusive.  The RENAME_CONFLICT state is a temporary
+    override during rename operations (wired in Stage 6); the model field
+    ``prior_hash_state`` stores the state to restore when rename mode exits.
+    """
+    NOT_HASHED = auto()        # queued but not yet hashed; hourglass shown (muted)
+    UNIQUE = auto()            # hashed; no duplicates found; no slot-4 icon
+    DUPLICATE_GENERAL = auto() # hashed; has duplicates; copy icon shown
+    DUPLICATE_SPECIFIC = auto()# hashed; is a duplicate of the file open in the main pane
+    RENAME_CONFLICT = auto()   # rename-in-progress override; warning icon (Stage 6)
+
+
 @dataclass
 class FileNode:
     path: Path
     file_type: FileType
     parent: FileNode | None = field(default=None, repr=False, compare=False)
     row: int = 0  # index within parent.children
-    children: list[FileNode] | None = field(default=None, repr=False)  # None = not yet scanned
+
+    # Slot indicators (computed at scan time; hash_state updated as hashing progresses)
+    ownership: OwnershipState = field(default=OwnershipState.NEITHER, compare=False)
+    permission: PermissionState = field(default=PermissionState.READ_WRITE, compare=False)
+    hash_state: HashState = field(default=HashState.NOT_HASHED, compare=False)
+    # Saved state for rename-conflict restore (Stage 6 writes/reads this)
+    prior_hash_state: HashState = field(default=HashState.NOT_HASHED, compare=False)
+
+    children: list[FileNode] | None = field(default=None, repr=False, compare=False)
 
     @property
     def name(self) -> str:
