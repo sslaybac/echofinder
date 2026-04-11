@@ -7,6 +7,7 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QLabel,
     QMainWindow,
+    QProgressBar,
     QSplitter,
     QStackedWidget,
     QStatusBar,
@@ -14,8 +15,10 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from echofinder.models.hash_cache import HashCache
 from echofinder.models.session import SessionState
 from echofinder.services.file_type import FileTypeResolver
+from echofinder.services.hashing_engine import HashingEngine
 from echofinder.ui.empty_state import EmptyStateWidget
 from echofinder.ui.file_tree_view import FileTreeView
 from echofinder.ui.tree_model import FileTreeModel
@@ -36,7 +39,22 @@ class MainWindow(QMainWindow):
         self._resolver = FileTypeResolver()
         self._tree_model: FileTreeModel | None = None
 
+        # Hashing infrastructure
+        self._hash_cache = HashCache()
+        self._hashing_engine = HashingEngine(self._hash_cache)
+        self._progress_bar: QProgressBar | None = None
+        self._progress_label: QLabel | None = None
+
         self._build_ui()
+        self._connect_engine_signals()
+
+        # Warn the user if the cache was corrupted and reset on startup
+        if self._hash_cache.was_reset:
+            self.statusBar().showMessage(
+                "Hash cache was corrupted and has been reset. Files will be re-hashed.",
+                8000,
+            )
+
         self._restore_session()
 
     # ------------------------------------------------------------------
@@ -93,12 +111,22 @@ class MainWindow(QMainWindow):
         self._right_splitter.setStretchFactor(0, 3)
         self._right_splitter.setStretchFactor(1, 1)
 
-        # --- Status bar (empty; populated in Stages 2 and 6) ---
+        # --- Status bar ---
         self.setStatusBar(QStatusBar())
 
         # --- Connections ---
         self._empty_state.select_folder_requested.connect(self.select_root_folder)
         self._tree_view.file_selected.connect(self._on_file_selected)
+
+    # ------------------------------------------------------------------
+    # Hashing engine signal connections
+    # ------------------------------------------------------------------
+
+    def _connect_engine_signals(self) -> None:
+        self._hashing_engine.hashing_started.connect(self._on_hashing_started)
+        self._hashing_engine.progress_updated.connect(self._on_progress_updated)
+        self._hashing_engine.hashing_complete.connect(self._on_hashing_complete)
+        self._hashing_engine.hashing_cancelled.connect(self._on_hashing_cancelled)
 
     # ------------------------------------------------------------------
     # Session restore
@@ -127,6 +155,11 @@ class MainWindow(QMainWindow):
             self._set_root(Path(folder), restore_expansion=False)
 
     def _set_root(self, path: Path, *, restore_expansion: bool) -> None:
+        # Cancel any in-progress hashing before switching roots
+        if self._hashing_engine.isRunning():
+            self._hashing_engine.cancel()
+            self._hashing_engine.wait(5000)
+
         # Disconnect old expansion signals if a model already exists
         if self._tree_model is not None:
             try:
@@ -163,6 +196,51 @@ class MainWindow(QMainWindow):
 
         # Show empty state (no file selected yet)
         self._preview_stack.setCurrentIndex(_PREVIEW_EMPTY)
+
+        # Start background hashing for the new root
+        self._hashing_engine.start_hashing(path)
+
+    # ------------------------------------------------------------------
+    # Hashing engine slots (called on main thread via queued connection)
+    # ------------------------------------------------------------------
+
+    def _on_hashing_started(self, total: int) -> None:
+        if total == 0:
+            return
+        # Replace any transient status message (e.g. cache-reset warning)
+        self.statusBar().clearMessage()
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setMaximum(total)
+        self._progress_bar.setValue(0)
+        self._progress_bar.setFixedWidth(200)
+        self._progress_label = QLabel(f"Hashing\u2026 0 / {total:,} (0 from cache)")
+        self.statusBar().addWidget(self._progress_bar)
+        self.statusBar().addWidget(self._progress_label)
+
+    def _on_progress_updated(self, current: int, total: int, from_cache: int) -> None:
+        if self._progress_bar is not None:
+            self._progress_bar.setValue(current)
+        if self._progress_label is not None:
+            self._progress_label.setText(
+                f"Hashing\u2026 {current:,} / {total:,} ({from_cache:,} from cache)"
+            )
+
+    def _on_hashing_complete(self) -> None:
+        self._remove_progress_widgets()
+
+    def _on_hashing_cancelled(self) -> None:
+        # Progress widgets will be re-created when the new root's hashing starts
+        self._remove_progress_widgets()
+
+    def _remove_progress_widgets(self) -> None:
+        if self._progress_bar is not None:
+            self.statusBar().removeWidget(self._progress_bar)
+            self._progress_bar.deleteLater()
+            self._progress_bar = None
+        if self._progress_label is not None:
+            self.statusBar().removeWidget(self._progress_label)
+            self._progress_label.deleteLater()
+            self._progress_label = None
 
     # ------------------------------------------------------------------
     # Expansion state persistence
@@ -214,3 +292,15 @@ class MainWindow(QMainWindow):
     def _on_file_selected(self, path: Path) -> None:
         # Enter key on a file — preview pane already updated via currentChanged
         pass
+
+    # ------------------------------------------------------------------
+    # Shutdown
+    # ------------------------------------------------------------------
+
+    def closeEvent(self, event) -> None:
+        # Cancel background hashing before the window closes to avoid Qt warnings
+        if self._hashing_engine.isRunning():
+            self._hashing_engine.cancel()
+            self._hashing_engine.wait(5000)
+        self._hash_cache.close()
+        super().closeEvent(event)

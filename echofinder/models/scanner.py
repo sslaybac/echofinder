@@ -1,9 +1,25 @@
 from __future__ import annotations
 
+import os
+from collections.abc import Iterator
 from pathlib import Path
 
 from echofinder.models.file_node import FileNode, FileType
 from echofinder.services.file_type import FileTypeResolver
+
+
+def walk_files(root: Path) -> Iterator[Path]:
+    """Yield every non-directory path under *root*, without following symlinks.
+
+    Errors accessing subdirectories are silently ignored.  Symlinks to files
+    are included; the caller is responsible for deciding whether to hash them.
+    """
+    for dirpath, _dirnames, filenames in os.walk(
+        str(root), followlinks=False, onerror=lambda _: None
+    ):
+        dp = Path(dirpath)
+        for name in filenames:
+            yield dp / name
 
 
 def scan_directory(
