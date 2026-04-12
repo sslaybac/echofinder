@@ -9,7 +9,6 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QProgressBar,
     QSplitter,
-    QStackedWidget,
     QStatusBar,
     QToolBar,
     QWidget,
@@ -19,14 +18,9 @@ from echofinder.models.hash_cache import HashCache
 from echofinder.models.session import SessionState
 from echofinder.services.file_type import FileTypeResolver
 from echofinder.services.hashing_engine import HashingEngine
-from echofinder.ui.empty_state import EmptyStateWidget
 from echofinder.ui.file_tree_view import FileTreeView
+from echofinder.ui.preview_pane import PreviewPane
 from echofinder.ui.tree_model import FileTreeModel
-
-# Index of the empty state widget within the preview QStackedWidget
-_PREVIEW_EMPTY = 0
-# Index of the selection placeholder
-_PREVIEW_SELECTION = 1
 
 
 class MainWindow(QMainWindow):
@@ -67,7 +61,7 @@ class MainWindow(QMainWindow):
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
 
-        open_action = toolbar.addAction("Open Folder…")
+        open_action = toolbar.addAction("Open Folder\u2026")
         open_action.triggered.connect(self.select_root_folder)
 
         # --- Central widget: horizontal splitter ---
@@ -82,21 +76,9 @@ class MainWindow(QMainWindow):
         self._right_splitter = QSplitter(Qt.Orientation.Vertical)
         self._main_splitter.addWidget(self._right_splitter)
 
-        # Preview area: QStackedWidget
-        self._preview_stack = QStackedWidget()
-        self._right_splitter.addWidget(self._preview_stack)
-
-        # Slot 0: empty state
-        self._empty_state = EmptyStateWidget()
-        self._preview_stack.addWidget(self._empty_state)
-
-        # Slot 1: selection placeholder (replaces empty state once anything is selected)
-        self._selection_label = QLabel()
-        self._selection_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._selection_label.setWordWrap(True)
-        self._preview_stack.addWidget(self._selection_label)
-
-        self._preview_stack.setCurrentIndex(_PREVIEW_EMPTY)
+        # Preview pane (QStackedWidget containing all content widgets)
+        self._preview_pane = PreviewPane()
+        self._right_splitter.addWidget(self._preview_pane)
 
         # Metadata panel placeholder (populated in Stage 5)
         self._metadata_panel = QWidget()
@@ -114,8 +96,9 @@ class MainWindow(QMainWindow):
         # --- Status bar ---
         self.setStatusBar(QStatusBar())
 
-        # --- Connections ---
-        self._empty_state.select_folder_requested.connect(self.select_root_folder)
+        # --- Signal connections ---
+        self._preview_pane.select_folder_requested.connect(self.select_root_folder)
+        self._preview_pane.navigate_to_path.connect(self._on_navigate_to_path)
         self._tree_view.file_selected.connect(self._on_file_selected)
 
     # ------------------------------------------------------------------
@@ -139,7 +122,7 @@ class MainWindow(QMainWindow):
             if root.is_dir():
                 self._set_root(root, restore_expansion=True)
                 return
-        self._preview_stack.setCurrentIndex(_PREVIEW_EMPTY)
+        self._preview_pane.show_empty()
 
     # ------------------------------------------------------------------
     # Root selection
@@ -186,7 +169,7 @@ class MainWindow(QMainWindow):
         if not restore_expansion:
             self._session.clear_expansion_state()
 
-        self.setWindowTitle(f"Echofinder — {path}")
+        self.setWindowTitle(f"Echofinder \u2014 {path}")
 
         # Restore or reset expansion state
         if restore_expansion:
@@ -199,8 +182,8 @@ class MainWindow(QMainWindow):
             self._on_selection_changed
         )
 
-        # Show empty state (no file selected yet)
-        self._preview_stack.setCurrentIndex(_PREVIEW_EMPTY)
+        # Show empty state (no file selected yet after changing root)
+        self._preview_pane.show_empty()
 
         # Start background hashing for the new root
         self._hashing_engine.start_hashing(path)
@@ -212,7 +195,6 @@ class MainWindow(QMainWindow):
     def _on_hashing_started(self, total: int) -> None:
         if total == 0:
             return
-        # Replace any transient status message (e.g. cache-reset warning)
         self.statusBar().clearMessage()
         self._progress_bar = QProgressBar()
         self._progress_bar.setMaximum(total)
@@ -234,7 +216,6 @@ class MainWindow(QMainWindow):
         self._remove_progress_widgets()
 
     def _on_hashing_cancelled(self) -> None:
-        # Progress widgets will be re-created when the new root's hashing starts
         self._remove_progress_widgets()
 
     def _remove_progress_widgets(self) -> None:
@@ -273,7 +254,6 @@ class MainWindow(QMainWindow):
         if self._tree_model is None:
             return
         paths = self._session.get_expansion_state()
-        # Expand top-down (shortest path first so parents load before children)
         for path_str in sorted(paths, key=lambda p: len(Path(p).parts)):
             idx = self._tree_model.index_for_path(Path(path_str))
             if idx.isValid():
@@ -285,19 +265,16 @@ class MainWindow(QMainWindow):
 
     def _on_selection_changed(self, current: QModelIndex, _previous: QModelIndex) -> None:
         if not current.isValid():
-            self._preview_stack.setCurrentIndex(_PREVIEW_EMPTY)
+            self._preview_pane.show_empty()
             if self._tree_model is not None:
                 self._tree_model.set_active_file(None)
             return
-        node = current.internalPointer()
-        self._selection_label.setText(
-            f"<b>{node.name}</b><br><br>"
-            f"<span style='color: gray;'>{node.path}</span>"
-        )
-        self._preview_stack.setCurrentIndex(_PREVIEW_SELECTION)
 
-        # Notify model so it can set DUPLICATE_SPECIFIC on matching nodes.
-        # Folders, symlinks, and dirs are not hashed — clear specific indicators.
+        node = current.internalPointer()
+        root = self._tree_model.root_path() if self._tree_model else None
+        self._preview_pane.show_for_node(node, root)
+
+        # Notify model so it can promote matching nodes to DUPLICATE_SPECIFIC.
         if self._tree_model is not None:
             if not node.is_dir and not node.is_symlink:
                 self._tree_model.set_active_file(str(node.path))
@@ -308,12 +285,26 @@ class MainWindow(QMainWindow):
         # Enter key on a file — preview pane already updated via currentChanged
         pass
 
+    def _on_navigate_to_path(self, path_obj: object) -> None:
+        """Navigate the tree to *path_obj* (a Path), expanding the parent if needed."""
+        if self._tree_model is None:
+            return
+        path = path_obj if isinstance(path_obj, Path) else Path(str(path_obj))
+        idx = self._tree_model.index_for_path(path)
+        if not idx.isValid():
+            return
+        # Expand the parent folder if it is currently collapsed
+        parent_idx = idx.parent()
+        if parent_idx.isValid() and not self._tree_view.isExpanded(parent_idx):
+            self._tree_view.expand(parent_idx)
+        self._tree_view.setCurrentIndex(idx)
+        self._tree_view.scrollTo(idx)
+
     # ------------------------------------------------------------------
     # Shutdown
     # ------------------------------------------------------------------
 
     def closeEvent(self, event) -> None:
-        # Cancel background hashing before the window closes to avoid Qt warnings
         if self._hashing_engine.isRunning():
             self._hashing_engine.cancel()
             self._hashing_engine.wait(5000)
