@@ -89,7 +89,24 @@ class FileTypeResolver:
             return FileType.AUDIO
         if mime == "application/pdf":
             return FileType.PDF
-        # text/* and application/* code types — defer to extension for text/code split
+        # text/plain → plain text; all other text/* (html, css, x-python…) → code
+        if mime == "text/plain":
+            return FileType.TEXT
+        if mime.startswith("text/"):
+            return FileType.CODE
+        # Common application/* code/data MIME types
+        if mime in (
+            "application/json",
+            "application/javascript",
+            "application/xml",
+            "application/xhtml+xml",
+            "application/typescript",
+            "application/graphql",
+        ):
+            return FileType.CODE
+        # application/x-* covers shell scripts, Python, Perl, Ruby, etc.
+        if mime.startswith("application/x-"):
+            return FileType.CODE
         return FileType.UNKNOWN
 
     def _ext_to_type(self, ext: str) -> FileType:

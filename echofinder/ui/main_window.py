@@ -15,18 +15,33 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from echofinder.models.file_node import FileType
 from echofinder.models.hash_cache import HashCache
 from echofinder.models.session import SessionState
 from echofinder.services.file_type import FileTypeResolver
 from echofinder.services.hashing_engine import HashingEngine
 from echofinder.ui.empty_state import EmptyStateWidget
 from echofinder.ui.file_tree_view import FileTreeView
+from echofinder.ui.preview.folder_contents_widget import FolderContentsWidget
+from echofinder.ui.preview.image_preview_widget import ImagePreviewWidget
+from echofinder.ui.preview.media_playback_widget import MediaPlaybackWidget
+from echofinder.ui.preview.pdf_preview_widget import PdfPreviewWidget
+from echofinder.ui.preview.symlink_widget import SymlinkWidget
+from echofinder.ui.preview.text_preview_widget import TextPreviewWidget
+from echofinder.ui.preview.unreadable_widget import UnreadableFileWidget
+from echofinder.ui.preview.unsupported_widget import UnsupportedFileWidget
 from echofinder.ui.tree_model import FileTreeModel
 
-# Index of the empty state widget within the preview QStackedWidget
+# QStackedWidget slot indices for the preview pane
 _PREVIEW_EMPTY = 0
-# Index of the selection placeholder
-_PREVIEW_SELECTION = 1
+_PREVIEW_SYMLINK = 1
+_PREVIEW_FOLDER = 2
+_PREVIEW_IMAGE = 3
+_PREVIEW_TEXT = 4
+_PREVIEW_PDF = 5
+_PREVIEW_MEDIA = 6
+_PREVIEW_UNSUPPORTED = 7
+_PREVIEW_UNREADABLE = 8
 
 
 class MainWindow(QMainWindow):
@@ -44,6 +59,9 @@ class MainWindow(QMainWindow):
         self._hashing_engine = HashingEngine(self._hash_cache)
         self._progress_bar: QProgressBar | None = None
         self._progress_label: QLabel | None = None
+
+        # Currently previewed path — used for load_failed messages
+        self._current_preview_path: Path | None = None
 
         self._build_ui()
         self._connect_engine_signals()
@@ -86,15 +104,41 @@ class MainWindow(QMainWindow):
         self._preview_stack = QStackedWidget()
         self._right_splitter.addWidget(self._preview_stack)
 
-        # Slot 0: empty state
+        # Slot 0: empty state (unchanged from Stage 1)
         self._empty_state = EmptyStateWidget()
-        self._preview_stack.addWidget(self._empty_state)
+        self._preview_stack.addWidget(self._empty_state)          # index 0
 
-        # Slot 1: selection placeholder (replaces empty state once anything is selected)
-        self._selection_label = QLabel()
-        self._selection_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._selection_label.setWordWrap(True)
-        self._preview_stack.addWidget(self._selection_label)
+        # Slot 1: symlink preview
+        self._symlink_widget = SymlinkWidget()
+        self._preview_stack.addWidget(self._symlink_widget)        # index 1
+
+        # Slot 2: folder contents
+        self._folder_widget = FolderContentsWidget()
+        self._preview_stack.addWidget(self._folder_widget)         # index 2
+
+        # Slot 3: image preview
+        self._image_widget = ImagePreviewWidget()
+        self._preview_stack.addWidget(self._image_widget)          # index 3
+
+        # Slot 4: text / code preview
+        self._text_widget = TextPreviewWidget()
+        self._preview_stack.addWidget(self._text_widget)           # index 4
+
+        # Slot 5: PDF preview
+        self._pdf_widget = PdfPreviewWidget()
+        self._preview_stack.addWidget(self._pdf_widget)            # index 5
+
+        # Slot 6: media playback (video / audio)
+        self._media_widget = MediaPlaybackWidget()
+        self._preview_stack.addWidget(self._media_widget)          # index 6
+
+        # Slot 7: unsupported file type
+        self._unsupported_widget = UnsupportedFileWidget()
+        self._preview_stack.addWidget(self._unsupported_widget)    # index 7
+
+        # Slot 8: unreadable file (permission / access errors)
+        self._unreadable_widget = UnreadableFileWidget()
+        self._preview_stack.addWidget(self._unreadable_widget)     # index 8
 
         self._preview_stack.setCurrentIndex(_PREVIEW_EMPTY)
 
@@ -117,6 +161,13 @@ class MainWindow(QMainWindow):
         # --- Connections ---
         self._empty_state.select_folder_requested.connect(self.select_root_folder)
         self._tree_view.file_selected.connect(self._on_file_selected)
+
+        # Preview widget signals
+        self._symlink_widget.navigate_to_path.connect(self._navigate_to_path)
+        self._folder_widget.navigate_to_path.connect(self._navigate_to_path)
+        self._image_widget.load_failed.connect(self._on_preview_load_failed)
+        self._text_widget.load_failed.connect(self._on_preview_load_failed)
+        self._pdf_widget.load_failed.connect(self._on_preview_load_failed)
 
     # ------------------------------------------------------------------
     # Hashing engine signal connections
@@ -175,6 +226,10 @@ class MainWindow(QMainWindow):
             except (RuntimeError, TypeError):
                 pass
 
+        # Clear per-root session state in preview widgets
+        self._image_widget.clear_session_state()
+        self._pdf_widget.clear_session_state()
+
         # Build new model and wire it to the hashing engine
         self._tree_model = FileTreeModel(self._resolver)
         self._hashing_engine.file_hashed.connect(self._tree_model.on_file_hashed)
@@ -200,6 +255,7 @@ class MainWindow(QMainWindow):
         )
 
         # Show empty state (no file selected yet)
+        self._current_preview_path = None
         self._preview_stack.setCurrentIndex(_PREVIEW_EMPTY)
 
         # Start background hashing for the new root
@@ -285,34 +341,114 @@ class MainWindow(QMainWindow):
 
     def _on_selection_changed(self, current: QModelIndex, _previous: QModelIndex) -> None:
         if not current.isValid():
+            self._release_current_preview()
             self._preview_stack.setCurrentIndex(_PREVIEW_EMPTY)
+            self._current_preview_path = None
             if self._tree_model is not None:
                 self._tree_model.set_active_file(None)
             return
-        node = current.internalPointer()
-        self._selection_label.setText(
-            f"<b>{node.name}</b><br><br>"
-            f"<span style='color: gray;'>{node.path}</span>"
-        )
-        self._preview_stack.setCurrentIndex(_PREVIEW_SELECTION)
 
-        # Notify model so it can set DUPLICATE_SPECIFIC on matching nodes.
-        # Folders, symlinks, and dirs are not hashed — clear specific indicators.
+        node = current.internalPointer()
+
+        # Release resource for whatever was showing before
+        self._release_current_preview()
+
+        self._current_preview_path = node.path
+        self._activate_preview(node)
+
+        # Update duplicate tracking
         if self._tree_model is not None:
             if not node.is_dir and not node.is_symlink:
                 self._tree_model.set_active_file(str(node.path))
             else:
                 self._tree_model.set_active_file(None)
 
+    def _activate_preview(self, node) -> None:
+        """Route the selected node to the appropriate preview widget."""
+        path = node.path
+        file_type = node.file_type
+
+        if node.is_symlink:
+            root = self._tree_model.root_path() if self._tree_model else None
+            self._symlink_widget.load(path, root)
+            self._preview_stack.setCurrentIndex(_PREVIEW_SYMLINK)
+            return
+
+        if node.is_dir:
+            self._folder_widget.load(path)
+            self._preview_stack.setCurrentIndex(_PREVIEW_FOLDER)
+            return
+
+        if file_type == FileType.IMAGE:
+            self._image_widget.load(path)
+            self._preview_stack.setCurrentIndex(_PREVIEW_IMAGE)
+
+        elif file_type in (FileType.TEXT, FileType.CODE):
+            self._text_widget.load(path)
+            self._preview_stack.setCurrentIndex(_PREVIEW_TEXT)
+
+        elif file_type == FileType.PDF:
+            self._pdf_widget.load(path)
+            self._preview_stack.setCurrentIndex(_PREVIEW_PDF)
+
+        elif file_type in (FileType.VIDEO, FileType.AUDIO):
+            self._media_widget.load(path)
+            self._preview_stack.setCurrentIndex(_PREVIEW_MEDIA)
+
+        else:
+            # UNKNOWN — no preview available
+            self._unsupported_widget.load(path)
+            self._preview_stack.setCurrentIndex(_PREVIEW_UNSUPPORTED)
+
+    def _release_current_preview(self) -> None:
+        """Release resources from the widget currently shown in the stack."""
+        current_idx = self._preview_stack.currentIndex()
+        if current_idx == _PREVIEW_IMAGE:
+            self._image_widget.release()
+        elif current_idx == _PREVIEW_PDF:
+            self._pdf_widget.release()
+        elif current_idx == _PREVIEW_MEDIA:
+            self._media_widget.stop_playback()
+
+    def _on_preview_load_failed(self, error_type: str) -> None:
+        """Called when a preview widget cannot read its file."""
+        filename = (
+            self._current_preview_path.name
+            if self._current_preview_path is not None
+            else "file"
+        )
+        self._unreadable_widget.show_error(error_type, filename)
+        self._preview_stack.setCurrentIndex(_PREVIEW_UNREADABLE)
+
     def _on_file_selected(self, path: Path) -> None:
         # Enter key on a file — preview pane already updated via currentChanged
         pass
+
+    # ------------------------------------------------------------------
+    # Navigation from preview widgets (symlink jump, folder item click)
+    # ------------------------------------------------------------------
+
+    def _navigate_to_path(self, path: Path) -> None:
+        """Navigate the tree to *path*, expanding the parent if needed."""
+        if self._tree_model is None:
+            return
+        idx = self._tree_model.index_for_path(path)
+        if not idx.isValid():
+            return
+        # Ensure the parent is expanded so the item is visible
+        parent_idx = idx.parent()
+        if parent_idx.isValid() and not self._tree_view.isExpanded(parent_idx):
+            self._tree_view.expand(parent_idx)
+        self._tree_view.setCurrentIndex(idx)
+        self._tree_view.scrollTo(idx)
 
     # ------------------------------------------------------------------
     # Shutdown
     # ------------------------------------------------------------------
 
     def closeEvent(self, event) -> None:
+        # Stop media playback before closing (avoids VLC cleanup warnings)
+        self._media_widget.stop_playback()
         # Cancel background hashing before the window closes to avoid Qt warnings
         if self._hashing_engine.isRunning():
             self._hashing_engine.cancel()
