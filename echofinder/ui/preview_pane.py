@@ -91,6 +91,7 @@ class PreviewPane(QStackedWidget):
     def show_empty(self) -> None:
         """Show the empty state widget and release any held image resource."""
         self._image.release()
+        self.encoding_detected.emit("")
         self.setCurrentIndex(_IDX_EMPTY)
 
     def show_for_node(self, node: FileNode, root: Path | None) -> None:
@@ -102,10 +103,12 @@ class PreviewPane(QStackedWidget):
             self._image.release()
 
         if file_type in (FileType.SYMLINK_INTERNAL, FileType.SYMLINK_EXTERNAL):
+            self.encoding_detected.emit("")
             self._symlink.load(node.path, root)
             self.setCurrentIndex(_IDX_SYMLINK)
 
         elif file_type == FileType.FOLDER:
+            self.encoding_detected.emit("")
             self._show_folder(node, root)
 
         elif file_type == FileType.IMAGE:
@@ -116,6 +119,7 @@ class PreviewPane(QStackedWidget):
 
         else:
             # PDF, AUDIO, VIDEO, UNKNOWN → unsupported (Stages 8-10 will handle the first three)
+            self.encoding_detected.emit("")
             self._unsupported.show_for(node.path, file_type)
             self.setCurrentIndex(_IDX_UNSUPPORTED)
 
@@ -135,6 +139,7 @@ class PreviewPane(QStackedWidget):
         self.setCurrentIndex(_IDX_FOLDER)
 
     def _show_image(self, node: FileNode) -> None:
+        self.encoding_detected.emit("")
         if node.permission == PermissionState.NOT_READABLE:
             self._unreadable.show_for(node.path, is_permission_error=True)
             self.setCurrentIndex(_IDX_UNREADABLE)
@@ -152,6 +157,7 @@ class PreviewPane(QStackedWidget):
 
     def _show_text(self, node: FileNode) -> None:
         if node.permission == PermissionState.NOT_READABLE:
+            self.encoding_detected.emit("")
             self._unreadable.show_for(node.path, is_permission_error=True)
             self.setCurrentIndex(_IDX_UNREADABLE)
             return
@@ -161,8 +167,10 @@ class PreviewPane(QStackedWidget):
             self.encoding_detected.emit(encoding)
             self.setCurrentIndex(_IDX_TEXT)
         except PermissionError:
+            self.encoding_detected.emit("")
             self._unreadable.show_for(node.path, is_permission_error=True)
             self.setCurrentIndex(_IDX_UNREADABLE)
         except OSError:
+            self.encoding_detected.emit("")
             self._unreadable.show_for(node.path, is_permission_error=False)
             self.setCurrentIndex(_IDX_UNREADABLE)

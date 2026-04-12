@@ -116,6 +116,36 @@ class HashCache:
         except sqlite3.Error:
             pass
 
+    def get_file_metadata(self, path: str) -> dict | None:
+        """Return {hash, filetype, language} for *path* if cached; else None."""
+        try:
+            with self._lock:
+                cur = self._conn.execute(
+                    "SELECT hash, filetype, language FROM files WHERE path=?",
+                    (path,),
+                )
+                row = cur.fetchone()
+            if row is None:
+                return None
+            return {"hash": row[0], "filetype": row[1], "language": row[2]}
+        except sqlite3.Error:
+            return None
+
+    def get_duplicate_paths(self, hash_val: str, exclude_path: str) -> list[str]:
+        """Return all cached paths sharing *hash_val*, excluding *exclude_path*."""
+        if not hash_val:
+            return []
+        try:
+            with self._lock:
+                cur = self._conn.execute(
+                    "SELECT path FROM files WHERE hash=? AND path!=?",
+                    (hash_val, exclude_path),
+                )
+                rows = cur.fetchall()
+            return [row[0] for row in rows]
+        except sqlite3.Error:
+            return []
+
     def update_path(self, old_path: str, new_path: str) -> None:
         """Update a cache entry's path, preserving all other values (called by Stage 6)."""
         try:

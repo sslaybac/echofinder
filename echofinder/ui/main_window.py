@@ -11,7 +11,6 @@ from PyQt6.QtWidgets import (
     QSplitter,
     QStatusBar,
     QToolBar,
-    QWidget,
 )
 
 from echofinder.models.hash_cache import HashCache
@@ -19,6 +18,7 @@ from echofinder.models.session import SessionState
 from echofinder.services.file_type import FileTypeResolver
 from echofinder.services.hashing_engine import HashingEngine
 from echofinder.ui.file_tree_view import FileTreeView
+from echofinder.ui.metadata_panel import MetadataPanel
 from echofinder.ui.preview_pane import PreviewPane
 from echofinder.ui.tree_model import FileTreeModel
 
@@ -80,8 +80,8 @@ class MainWindow(QMainWindow):
         self._preview_pane = PreviewPane()
         self._right_splitter.addWidget(self._preview_pane)
 
-        # Metadata panel placeholder (populated in Stage 5)
-        self._metadata_panel = QWidget()
+        # Metadata panel (Stage 5)
+        self._metadata_panel = MetadataPanel(self._hash_cache)
         self._metadata_panel.setMinimumHeight(80)
         self._metadata_panel.setMaximumHeight(200)
         self._right_splitter.addWidget(self._metadata_panel)
@@ -99,7 +99,9 @@ class MainWindow(QMainWindow):
         # --- Signal connections ---
         self._preview_pane.select_folder_requested.connect(self.select_root_folder)
         self._preview_pane.navigate_to_path.connect(self._on_navigate_to_path)
+        self._preview_pane.encoding_detected.connect(self._metadata_panel.set_encoding)
         self._tree_view.file_selected.connect(self._on_file_selected)
+        self._metadata_panel.navigate_to_path.connect(self._on_navigate_to_path)
 
     # ------------------------------------------------------------------
     # Hashing engine signal connections
@@ -110,6 +112,7 @@ class MainWindow(QMainWindow):
         self._hashing_engine.progress_updated.connect(self._on_progress_updated)
         self._hashing_engine.hashing_complete.connect(self._on_hashing_complete)
         self._hashing_engine.hashing_cancelled.connect(self._on_hashing_cancelled)
+        self._hashing_engine.file_hashed.connect(self._metadata_panel.on_file_hashed)
 
     # ------------------------------------------------------------------
     # Session restore
@@ -184,6 +187,7 @@ class MainWindow(QMainWindow):
 
         # Show empty state (no file selected yet after changing root)
         self._preview_pane.show_empty()
+        self._metadata_panel.clear()
 
         # Start background hashing for the new root
         self._hashing_engine.start_hashing(path)
@@ -266,17 +270,28 @@ class MainWindow(QMainWindow):
     def _on_selection_changed(self, current: QModelIndex, _previous: QModelIndex) -> None:
         if not current.isValid():
             self._preview_pane.show_empty()
+            self._metadata_panel.clear()
             if self._tree_model is not None:
                 self._tree_model.set_active_file(None)
             return
 
         node = current.internalPointer()
         root = self._tree_model.root_path() if self._tree_model else None
+
+        # show_for_node emits encoding_detected (synchronously), which updates
+        # the metadata panel's encoding row before display_file() is called.
         self._preview_pane.show_for_node(node, root)
+
+        # Show metadata only for regular files; hide for folders and symlinks.
+        is_file = not node.is_dir and not node.is_symlink
+        if is_file:
+            self._metadata_panel.display_file(str(node.path))
+        else:
+            self._metadata_panel.clear()
 
         # Notify model so it can promote matching nodes to DUPLICATE_SPECIFIC.
         if self._tree_model is not None:
-            if not node.is_dir and not node.is_symlink:
+            if is_file:
                 self._tree_model.set_active_file(str(node.path))
             else:
                 self._tree_model.set_active_file(None)
