@@ -112,6 +112,7 @@ dependencies = [
     { name = "pymupdf" },
     { name = "pyqt6" },
     { name = "python-magic" },
+    { name = "python-vlc" },
     { name = "send2trash" },
 ]
 
@@ -129,6 +130,7 @@ requires-dist = [
     { name = "pymupdf", specifier = ">=1.27.2.2" },
     { name = "pyqt6", specifier = ">=6.11.0" },
     { name = "python-magic", specifier = ">=0.4.27" },
+    { name = "python-vlc", specifier = ">=3.0.21203" },
     { name = "send2trash", specifier = ">=2.1.0" },
 ]
 
@@ -364,6 +366,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/da/db/0b3e28ac047452d079d375ec6798bf76a036a08182dbb39ed38116a49130/python-magic-0.4.27.tar.gz", hash = "sha256:c1ba14b08e4a5f5c31a302b7721239695b2f0f058d125bd5ce1ee36b9d9d3c3b", size = 14677 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/6c/73/9f872cb81fc5c3bb48f7227872c28975f998f3e7c2b1c16e95e6432bbb90/python_magic-0.4.27-py2.py3-none-any.whl", hash = "sha256:c212960ad306f700aa0d01e5d7a325d20548ff97eb9920dcd29513174f0294d3", size = 13840 },
+]
+
+[[package]]
+name = "python-vlc"
+version = "3.0.21203"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/4b/5b/f9ce6f0c9877b6fe5eafbade55e0dcb6b2b30f1c2c95837aef40e390d63b/python_vlc-3.0.21203.tar.gz", hash = "sha256:52d0544b276b11e58b6c0b748c3e0518f94f74b1b4cd328c83a59eacabead1ec", size = 162211 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5b/ee/7d76eb3b50ccb1397621f32ede0fb4d17aa55a9aa2251bc34e6b9929fdce/python_vlc-3.0.21203-py3-none-any.whl", hash = "sha256:1613451a31b692ec276296ceeae0c0ba82bfc2d094dabf9aceb70f58944a6320", size = 87651 },
 ]
 
 [[package]]

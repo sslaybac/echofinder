@@ -23,6 +23,7 @@ dependencies = [
     "pymupdf>=1.27.2.2",
     "pyqt6>=6.11.0",
     "python-magic>=0.4.27",
+    "python-vlc>=3.0.21203",
     "send2trash>=2.1.0",
 ]
 
