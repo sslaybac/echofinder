@@ -22,6 +22,7 @@ from PyQt6.QtCore import (
     QPersistentModelIndex,
     QRect,
     Qt,
+    QTimer,
     pyqtSignal,
 )
 from PyQt6.QtGui import (
@@ -40,7 +41,6 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMenu,
-    QMessageBox,
     QSizePolicy,
     QStyleOptionViewItem,
     QTreeView,
@@ -127,6 +127,9 @@ class RenameDelegate(NodeIndicatorDelegate):
         self._editing: bool = False
         self._current_editor: QLineEdit | None = None
         self._rename_index: QPersistentModelIndex | None = None
+        # Stores (old_path, new_path) after a successful rename; applied in
+        # destroyEditor once the editor is fully torn down.
+        self._pending_rename: tuple[Path, Path] | None = None
         # Set during movement mode to suppress painting of the source row
         self._hidden_persistent: QPersistentModelIndex | None = None
 
@@ -180,8 +183,29 @@ class RenameDelegate(NodeIndicatorDelegate):
         pass
 
     def destroyEditor(self, editor: QWidget, index: QModelIndex) -> None:
+        pending = self._pending_rename
+        self._pending_rename = None
         self._exit_rename()
         super().destroyEditor(editor, index)
+        if pending is not None:
+            old_path, new_path = pending
+            # Defer model/cache updates to the next event loop iteration so
+            # that the editor teardown and any residual key events are fully
+            # processed before we remove and re-insert rows.
+            QTimer.singleShot(0, lambda: self._apply_pending_rename(old_path, new_path))
+
+    def _apply_pending_rename(self, old_path: Path, new_path: Path) -> None:
+        """Apply model and cache updates after the rename editor has closed."""
+        if self._view._cache is not None:
+            self._view._cache.update_path(str(old_path), str(new_path))
+        model = self._view.model()
+        if isinstance(model, FileTreeModel):
+            model.notify_path_changed(str(old_path), str(new_path))
+            model.refresh_dir(old_path.parent)
+            # Re-select the renamed item so the preview pane stays populated.
+            new_idx = model.index_for_path(new_path)
+            if new_idx.isValid():
+                self._view.setCurrentIndex(new_idx)
 
     # ------------------------------------------------------------------
     # Event filter — intercept Enter/Escape on the inline editor
@@ -266,14 +290,11 @@ class RenameDelegate(NodeIndicatorDelegate):
             self.closeEditor.emit(editor, QAbstractItemDelegate.EndEditHint.RevertModelData)
             return
 
-        # Update cache and tree
-        model = self._view.model()
-        if isinstance(model, FileTreeModel):
-            model.notify_path_changed(str(old_path), str(new_path))
-            model.refresh_dir(parent_dir)
-        if self._view._cache is not None:
-            self._view._cache.update_path(str(old_path), str(new_path))
-
+        # Store the rename so destroyEditor can apply model/cache updates after
+        # the editor is fully torn down.  Doing it here (while the editor is
+        # still alive) causes refresh_dir to clear the selection mid-teardown,
+        # which lets the Enter key reach the now-visible EmptyStateWidget button.
+        self._pending_rename = (old_path, new_path)
         self._exit_rename()
         self.closeEditor.emit(editor, QAbstractItemDelegate.EndEditHint.NoHint)
 
@@ -377,23 +398,38 @@ class _ConflictDialog(QDialog):
 # ---------------------------------------------------------------------------
 
 def _error_dialog(parent: QWidget, title: str, message: str) -> None:
-    box = QMessageBox(parent)
-    box.setWindowTitle(title)
-    box.setIcon(QMessageBox.Icon.Warning)
-    box.setText(message)
-    box.exec()
+    dlg = QDialog(parent)
+    dlg.setWindowTitle(title)
+    dlg.setSizeGripEnabled(True)
+    dlg.setMinimumWidth(420)
+    layout = QVBoxLayout(dlg)
+    layout.setSpacing(12)
+    label = QLabel(message)
+    label.setWordWrap(True)
+    layout.addWidget(label)
+    buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
+    buttons.accepted.connect(dlg.accept)
+    layout.addWidget(buttons)
+    dlg.exec()
 
 
 def _confirm_dialog(parent: QWidget, title: str, message: str) -> bool:
-    box = QMessageBox(parent)
-    box.setWindowTitle(title)
-    box.setIcon(QMessageBox.Icon.Question)
-    box.setText(message)
-    box.setStandardButtons(
-        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+    dlg = QDialog(parent)
+    dlg.setWindowTitle(title)
+    dlg.setSizeGripEnabled(True)
+    dlg.setMinimumWidth(420)
+    layout = QVBoxLayout(dlg)
+    layout.setSpacing(12)
+    label = QLabel(message)
+    label.setWordWrap(True)
+    layout.addWidget(label)
+    buttons = QDialogButtonBox(
+        QDialogButtonBox.StandardButton.Yes | QDialogButtonBox.StandardButton.No
     )
-    box.setDefaultButton(QMessageBox.StandardButton.No)
-    return box.exec() == QMessageBox.StandardButton.Yes
+    buttons.accepted.connect(dlg.accept)
+    buttons.rejected.connect(dlg.reject)
+    layout.addWidget(buttons)
+    return dlg.exec() == QDialog.DialogCode.Accepted
 
 
 # ---------------------------------------------------------------------------

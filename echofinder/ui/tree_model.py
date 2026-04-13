@@ -308,7 +308,12 @@ class FileTreeModel(QAbstractItemModel):
         if not index.isValid():
             # Allow drops on the viewport background (between all items)
             return Qt.ItemFlag.ItemIsDropEnabled
-        base = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsDragEnabled
+        base = (
+            Qt.ItemFlag.ItemIsEnabled
+            | Qt.ItemFlag.ItemIsSelectable
+            | Qt.ItemFlag.ItemIsDragEnabled
+            | Qt.ItemFlag.ItemIsEditable
+        )
         node: FileNode = index.internalPointer()
         if node.is_dir:
             base |= Qt.ItemFlag.ItemIsDropEnabled
