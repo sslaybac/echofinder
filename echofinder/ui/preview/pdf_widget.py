@@ -271,12 +271,23 @@ class PDFPreviewWidget(QWidget):
         if self._doc is None or not self._page_labels:
             return
 
+        zoom = self._zoom_state.get(self._current_path or "", 1.0)
+
+        # Guard: placeholder sizes are computed in load() while the widget may
+        # still be hidden, so the viewport geometry may not have been finalised
+        # yet (first-time show).  If the expected width now differs from what
+        # the labels were built with, rebuild at the correct size and let the
+        # timer fire a second time before attempting to render.
+        expected_w, _ = self._page_render_size(0, zoom)
+        if self._page_labels[0].width() != expected_w:
+            self._rebuild_placeholders_at_zoom(zoom)
+            return
+
         viewport = self._scroll.viewport()
         scroll_top = self._scroll.verticalScrollBar().value()
         scroll_bottom = scroll_top + viewport.height()
         buffer = viewport.height() * _RENDER_MARGIN
 
-        zoom = self._zoom_state.get(self._current_path or "", 1.0)
         avail = self._avail_width()
 
         for i, lbl in enumerate(self._page_labels):
