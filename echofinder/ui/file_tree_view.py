@@ -18,8 +18,10 @@ from pathlib import Path
 from PyQt6.QtCore import (
     QAbstractItemModel,
     QEvent,
+    QMimeData,
     QModelIndex,
     QPersistentModelIndex,
+    QPoint,
     QRect,
     Qt,
     QTimer,
@@ -27,6 +29,7 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import (
     QColor,
+    QDrag,
     QKeyEvent,
     QPainter,
     QPen,
@@ -60,6 +63,9 @@ from echofinder.services.file_operations import (
 from echofinder.ui.node_delegate import NodeIndicatorDelegate
 from echofinder.ui.tree_model import FileTreeModel
 
+# MIME type used to carry the source path during an internal drag.
+_DRAG_MIME_TYPE = "application/x-echofinder-path"
+
 
 # ---------------------------------------------------------------------------
 # Ghost overlay widget
@@ -80,6 +86,11 @@ class _GhostOverlay(QWidget):
     def show_ghost(self, rect: QRect, collision: bool = False) -> None:
         self._rect = QRect(rect)
         self._collision = collision
+        # QAbstractItemView::scrollContentsBy calls viewport()->scroll(dx, dy),
+        # which physically moves all child widgets of the viewport (including this
+        # overlay) by the scroll delta.  Resetting to (0, 0) before each paint
+        # counteracts any accumulated drift.
+        self.move(0, 0)
         self.resize(self.parent().size())  # type: ignore[union-attr]
         self.show()
         self.raise_()
@@ -201,7 +212,9 @@ class RenameDelegate(NodeIndicatorDelegate):
         model = self._view.model()
         if isinstance(model, FileTreeModel):
             model.notify_path_changed(str(old_path), str(new_path))
+            expanded = self._view._collect_all_expanded()
             model.refresh_dir(old_path.parent)
+            self._view._restore_all_expanded(expanded)
             # Re-select the renamed item so the preview pane stays populated.
             new_idx = model.index_for_path(new_path)
             if new_idx.isValid():
@@ -458,12 +471,16 @@ class FileTreeView(QTreeView):
         # Hash cache reference (set by MainWindow after construction)
         self._cache = None
 
-        # Drag-and-drop (internal only; cross-app DnD not supported)
-        self.setDragEnabled(True)
+        # Drag-and-drop (internal only; cross-app DnD not supported).
+        # We implement drag initiation manually in mouseMoveEvent so that
+        # the drag starts reliably regardless of Qt's internal state machine.
         self.setAcceptDrops(True)
         self.setDropIndicatorShown(True)
-        self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
-        self._drag_source_persistent: QPersistentModelIndex | None = None
+        self._drag_start_pos: "QPoint | None" = None
+        self._drag_source_path: Path | None = None
+        # Set during an active drag so dragMoveEvent can update the overlay.
+        self._drag_ghost_source_path: Path | None = None
+        self._drag_ghost_height: int = 0
 
         # Movement mode state
         self._movement_mode: bool = False
@@ -664,7 +681,9 @@ class FileTreeView(QTreeView):
         model = self.model()
         if isinstance(model, FileTreeModel):
             model.notify_path_removed(str(node.path))
+            expanded = self._collect_all_expanded()
             model.refresh_dir(node.path.parent)
+            self._restore_all_expanded(expanded)
 
         if self._cache is not None:
             # Remove from cache: update_path to nowhere is not meaningful;
@@ -751,19 +770,48 @@ class FileTreeView(QTreeView):
         if self._cache is not None:
             self._cache.update_path(old_path, new_path)
 
+    def _collect_all_expanded(self) -> list[str]:
+        """Return the paths of every currently-expanded node in the tree."""
+        result: list[str] = []
+        self._collect_expanded_recursive(QModelIndex(), result)
+        return result
+
+    def _collect_expanded_recursive(self, parent: QModelIndex, result: list[str]) -> None:
+        model = self.model()
+        if model is None:
+            return
+        for row in range(model.rowCount(parent)):
+            idx = model.index(row, 0, parent)
+            if self.isExpanded(idx):
+                node = idx.internalPointer()
+                result.append(str(node.path))
+                self._collect_expanded_recursive(idx, result)
+
+    def _restore_all_expanded(self, paths: list[str]) -> None:
+        """Re-expand nodes by path after rows have been removed and re-inserted."""
+        model = self.model()
+        if not isinstance(model, FileTreeModel):
+            return
+        # Restore shallowest paths first so parents are expanded before children.
+        for path_str in sorted(paths, key=lambda p: len(Path(p).parts)):
+            idx = model.index_for_path(Path(path_str))
+            if idx.isValid():
+                self.expand(idx)
+
     def _tree_refresh(self, old_path: Path, new_path: Path) -> None:
         model = self.model()
         if not isinstance(model, FileTreeModel):
             return
         model.notify_path_changed(str(old_path), str(new_path))
-        # Always refresh the old parent (item removed from there)
+        # Snapshot expansion state before any rows are removed; refresh_dir
+        # removes and re-inserts rows, invalidating Qt's tracked expanded set.
+        expanded = self._collect_all_expanded()
         model.refresh_dir(old_path.parent)
-        # Refresh the new parent if different
         if new_path.parent != old_path.parent:
             model.refresh_dir(new_path.parent)
-        # For directory merges, refresh the destination directory itself
         if new_path.is_dir():
             model.refresh_dir(new_path)
+        self._restore_all_expanded(expanded)
 
     def _report_move_failures(self, failures: list[tuple[str, str]]) -> None:
         lines = "\n".join(f"  \u2022 {Path(p).name}: {msg}" for p, msg in failures)
@@ -774,65 +822,141 @@ class FileTreeView(QTreeView):
         )
 
     # ------------------------------------------------------------------
-    # Drag-and-drop
+    # Drag-and-drop — manual initiation via mousePressEvent / mouseMoveEvent
     # ------------------------------------------------------------------
+    # Qt's built-in drag-start state machine (DraggingState) is unreliable
+    # in this configuration (custom delegate + ItemIsEditable + custom model).
+    # We track the press position ourselves and create the QDrag explicitly
+    # once the cursor moves beyond startDragDistance.
 
-    def startDrag(self, supportedActions) -> None:
-        idx = self.currentIndex()
-        self._drag_source_persistent = QPersistentModelIndex(idx) if idx.isValid() else None
-        super().startDrag(supportedActions)
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and not self._movement_mode:
+            idx = self.indexAt(event.position().toPoint())
+            if idx.isValid():
+                node: FileNode = idx.internalPointer()
+                self._drag_start_pos = event.position().toPoint()
+                self._drag_source_path = node.path
+            else:
+                self._drag_start_pos = None
+                self._drag_source_path = None
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        self._drag_start_pos = None
+        self._drag_source_path = None
+        super().mouseReleaseEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if (
+            event.buttons() & Qt.MouseButton.LeftButton
+            and self._drag_start_pos is not None
+            and self._drag_source_path is not None
+            and not self._movement_mode
+            and not self._rename_delegate.is_editing
+        ):
+            dist = (event.position().toPoint() - self._drag_start_pos).manhattanLength()
+            if dist >= QApplication.startDragDistance():
+                self._initiate_drag(self._drag_source_path)
+                self._drag_start_pos = None
+                self._drag_source_path = None
+                return
+        super().mouseMoveEvent(event)
+
+    def _initiate_drag(self, src_path: Path) -> None:
+        # Prepare the ghost overlay before exec() blocks the call.
+        model = self.model()
+        if isinstance(model, FileTreeModel):
+            src_idx = model.index_for_path(src_path)
+            if src_idx.isValid():
+                self._drag_ghost_height = self._compute_ghost_height(src_idx)
+                row_rect = self.visualRect(src_idx)
+                ghost_rect = QRect(
+                    row_rect.left(), row_rect.top(),
+                    row_rect.width(), self._drag_ghost_height,
+                )
+                self._ghost_overlay.show_ghost(ghost_rect, False)
+
+        self._drag_ghost_source_path = src_path
+
+        mime = QMimeData()
+        mime.setData(_DRAG_MIME_TYPE, str(src_path).encode("utf-8"))
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        try:
+            drag.exec(Qt.DropAction.MoveAction)
+        finally:
+            self._ghost_overlay.clear_ghost()
+            self._drag_ghost_source_path = None
+            self._drag_ghost_height = 0
 
     def dragEnterEvent(self, event) -> None:
-        if event.source() is self:
+        if event.source() is self and event.mimeData().hasFormat(_DRAG_MIME_TYPE):
             event.acceptProposedAction()
         else:
             event.ignore()
 
     def dragMoveEvent(self, event) -> None:
-        if event.source() is self:
+        if event.source() is self and event.mimeData().hasFormat(_DRAG_MIME_TYPE):
             event.acceptProposedAction()
+            if self._drag_ghost_source_path is not None:
+                self._update_drag_ghost(event.position().toPoint())
         else:
+            self._ghost_overlay.clear_ghost()
             event.ignore()
 
+    def _update_drag_ghost(self, viewport_pos: QPoint) -> None:
+        """Reposition the ghost overlay to follow the cursor during a drag."""
+        target_idx = self.indexAt(viewport_pos)
+        if not target_idx.isValid():
+            self._ghost_overlay.clear_ghost()
+            return
+        target_node: FileNode = target_idx.internalPointer()
+        row_rect = self.visualRect(target_idx)
+        if target_node.is_dir and self.isExpanded(target_idx):
+            ghost_top = row_rect.bottom()
+        else:
+            ghost_top = row_rect.top()
+        ghost_rect = QRect(
+            row_rect.left(), ghost_top,
+            row_rect.width(), self._drag_ghost_height,
+        )
+        collision = check_name_collision(
+            target_node.path if (target_node.is_dir and self.isExpanded(target_idx))
+            else target_node.path.parent,
+            self._drag_ghost_source_path.name,
+        )
+        self._ghost_overlay.show_ghost(ghost_rect, collision)
+
     def dropEvent(self, event) -> None:
+        self._ghost_overlay.clear_ghost()
         if event.source() is not self:
             event.ignore()
             return
-        event.accept()
+        mime = event.mimeData()
+        if not mime.hasFormat(_DRAG_MIME_TYPE):
+            event.ignore()
+            return
 
-        # Destination
+        src_path = Path(mime.data(_DRAG_MIME_TYPE).data().decode("utf-8"))
+
         pos = event.position().toPoint()
         dst_index = self.indexAt(pos)
 
         if not dst_index.isValid():
-            # Dropped on empty space — land in root
             model = self.model()
-            dst_parent: Path | None = model.root_path() if isinstance(model, FileTreeModel) else None
+            dst_parent: Path | None = (
+                model.root_path() if isinstance(model, FileTreeModel) else None
+            )
         else:
             dst_node: FileNode = dst_index.internalPointer()
-            if dst_node.is_dir:
-                dst_parent = dst_node.path
-            else:
-                dst_parent = dst_node.path.parent
+            dst_parent = dst_node.path if dst_node.is_dir else dst_node.path.parent
 
-        # Source
-        src_index = (
-            QModelIndex(self._drag_source_persistent)
-            if self._drag_source_persistent
-            else QModelIndex()
-        )
-        if not src_index.isValid():
-            return
-        src_node: FileNode = src_index.internalPointer()
+        event.accept()
 
-        if dst_parent is None:
+        if dst_parent is None or dst_parent == src_path.parent:
             return
 
-        # Don't move onto self
-        if dst_parent == src_node.path.parent and dst_parent == src_node.path:
-            return
-
-        self._do_move(src_node.path, dst_parent)
+        self._do_move(src_path, dst_parent)
 
     # ------------------------------------------------------------------
     # Keyboard movement mode
