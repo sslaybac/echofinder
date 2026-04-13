@@ -31,8 +31,9 @@ instantly.
   - Folder contents are shown as a navigable list.
   - Symlinks show their target path with a navigation link.
   - PDF files are rendered inline with multi-page scroll and zoom support.
-  - Audio playback and video playback are not yet implemented and will be
-    added in subsequent stages.
+  - Audio files are played back inline with play/pause, stop, seek, and
+    volume controls. VLC must be installed on the host system.
+  - Video playback is not yet implemented and will be added in a subsequent stage.
 
 - **Metadata panel** — Displays the SHA-256 hash, MIME type, programming language,
   character encoding, and duplicate count for the selected file. The duplicates row
@@ -62,6 +63,7 @@ instantly.
 | Image preview            | Pillow                   | JPEG, PNG, GIF, TIFF, BMP, WebP            |
 | File type detection      | python-magic             | MIME type via libmagic                     |
 | PDF rendering            | PyMuPDF (fitz)           | Multi-page preview with zoom               |
+| Audio playback           | python-vlc               | Wraps libvlc; VLC must be installed        |
 | Syntax highlighting      | Pygments                 | 500+ languages                             |
 | Encoding detection       | charset-normalizer       | Automatic detection for non-UTF-8 text     |
 | Config file paths        | platformdirs             | OS-appropriate locations                   |
@@ -74,20 +76,20 @@ instantly.
 - **Python 3.11 or later**
 - **uv** — install from [https://docs.astral.sh/uv/](https://docs.astral.sh/uv/getting-started/installation/)
 
-### System library (Linux only)
+### System libraries (Linux only)
 
-On Linux, `python-magic` requires **libmagic**:
+On Linux, `python-magic` requires **libmagic** and audio playback requires **VLC**:
 
 ```bash
 # Alma Linux / RHEL / Fedora
-sudo dnf install file-libs
+sudo dnf install file-libs vlc
 
 # Debian / Ubuntu
-sudo apt install libmagic1
+sudo apt install libmagic1 vlc
 ```
 
-On Windows, `python-magic` bundles the necessary DLL automatically — no extra
-installation is needed.
+On Windows, `python-magic` bundles the necessary DLL automatically. VLC must be
+installed separately from [videolan.org](https://www.videolan.org/).
 
 ---
 
@@ -119,10 +121,9 @@ button in the empty state view) to choose a root directory and begin exploring.
 
 The following preview types are planned and will be added in subsequent stages:
 
-- **Audio playback** (Stage 9) — play/pause/seek controls
 - **Video playback** (Stage 10) — inline video with playback controls
 
-Files of these types currently show an "unsupported format" placeholder in the preview
+Files of this type currently show an "unsupported format" placeholder in the preview
 pane.
 
 ---

@@ -18,7 +18,7 @@ logic in widgets.
 - `echofinder/ui/` — all PyQt6 widgets and UI components
 
 ## Implementation Status
-Ten-stage plan. **Stages 1–8 are complete.** Stages 9–10 remain.
+Eleven-stage plan. **Stages 1–9 are complete.** Stages 10–11 remain.
 
 | Stage | Title                        | Status    |
 |-------|------------------------------|-----------|
@@ -30,7 +30,7 @@ Ten-stage plan. **Stages 1–8 are complete.** Stages 9–10 remain.
 | 6     | File Operations              | Complete  |
 | 7     | Live Polling and Polish      | Complete  |
 | 8     | PDF Preview                  | Complete  |
-| 9     | Audio Playback               | Remaining |
+| 9     | Audio Playback               | Complete  |
 | 10    | Video Playback               | Remaining |
 | 11    | EPUB Preview                 | Remaining |
 
@@ -39,10 +39,26 @@ include it. The Stage 11 spec is in `planning/Echofinder_Stage11_Context.md` (lo
 only — not in the repository); see the Stage 11 section below for implementation
 context.
 
-Stages 9 and 10 use python-vlc. Stage 9 installs the dependency; Stage 10 reuses it.
+Stages 9 and 10 use python-vlc. Stage 9 installed the dependency; Stage 10 reuses it.
 VLC must be installed on the host system. Embedding VLC video output in a Qt widget
 requires platform-specific wiring (`win_id` / `x_window` handle) — test on both Alma
 Linux 9 and Windows 11.
+
+## Stage 9: Audio Playback — Implementation Notes
+`ui/preview/audio_widget.py` — `AudioPreviewWidget` with play/pause toggle, stop,
+seek slider with elapsed/total time display, and volume slider.
+
+**VLC initialisation** — `vlc.Instance` and `MediaPlayer` are created lazily on the
+first `load()` call with `--no-video --no-xlib` to suppress video-output and X11
+initialisation that would segfault inside a Qt application on Linux. The `Media`
+object is stored as `self._media` for the lifetime of playback; releasing it to GC
+while VLC holds a raw C pointer causes an immediate crash.
+
+**Volume safety** — `audio_set_volume()` is only safe once the VLC audio output
+exists, which is not until `State.Playing` is reached. It must not be called in
+`load()` or immediately after `play()` (both crash with a null-pointer dereference
+in libvlc 3.x). Volume is applied by the poll timer on the first confirmed-playing
+tick via a `_volume_dirty` flag.
 
 ## Settled Design Decisions
 The following decisions were made deliberately after evaluating alternatives. Do not
