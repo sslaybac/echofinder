@@ -33,16 +33,35 @@ _POLL_INTERVAL_MS = 500
 
 
 def _fmt_ms(ms: int) -> str:
-    """Format milliseconds as ``m:ss``."""
+    """Format milliseconds as ``m:ss``.
+
+    Args:
+        ms: Duration in milliseconds.
+
+    Returns:
+        A string in ``m:ss`` format, e.g. ``"3:07"``.
+    """
     s = ms // 1000
     return f"{s // 60}:{s % 60:02d}"
 
 
 class AudioPreviewWidget(QWidget):
-    """Plays audio files using python-vlc with play/pause, stop, seek, and volume."""
+    """Plays audio files using python-vlc with play/pause, stop, seek, and volume.
+
+    The VLC instance and media player are created lazily on the first call to
+    ``load()``. No audio data is held in the Python process; VLC manages its
+    own memory. Playback resets when ``load()`` is called with a new path.
+
+    If python-vlc or libvlc is unavailable at import time, the widget renders
+    in a disabled state and does not crash.
+    """
 
     def __init__(self, parent: QWidget | None = None) -> None:
-        """Build the control layout; VLC instance is created lazily on first load."""
+        """Build the control layout; VLC instance is created lazily on first load.
+
+        Args:
+            parent: Optional Qt parent widget.
+        """
         super().__init__(parent)
 
         self._instance: object | None = None   # vlc.Instance
@@ -145,10 +164,15 @@ class AudioPreviewWidget(QWidget):
     # ------------------------------------------------------------------
 
     def load(self, path: Path) -> None:
-        """Stop any current playback and load *path* for playback.
+        """Stop any current playback and prepare *path* for playback.
+
+        Resets the seek slider, time display, and play button to their initial
+        state. The VLC instance and media player are created on the first call.
+        Volume is not applied here; it is synced by ``_poll_playback`` once
+        ``State.Playing`` is confirmed (libvlc VLC 3.x crash avoidance).
 
         Args:
-            path: Absolute path to the audio file.
+            path: Absolute path to the audio file to load.
         """
         self._stop_playback()
         self._current_path = path
@@ -189,7 +213,12 @@ class AudioPreviewWidget(QWidget):
         self._stop_btn.setEnabled(True)
 
     def release(self) -> None:
-        """Stop playback and release the current media without destroying VLC."""
+        """Stop playback and release the current media without destroying VLC.
+
+        Clears all UI fields and drops the Python reference to the ``Media``
+        object. The VLC instance and player are retained so they can be reused
+        on the next ``load()`` call without re-initializing libvlc.
+        """
         self._stop_playback()
         self._media = None   # release Python reference; VLC player retains its own
         self._current_path = None
@@ -205,6 +234,14 @@ class AudioPreviewWidget(QWidget):
     # ------------------------------------------------------------------
 
     def _on_play_pause(self) -> None:
+        """Toggle between play and pause; connected to the Play/Pause button.
+
+        If the player is currently in ``State.Playing``, pauses it and stops
+        the poll timer. Otherwise calls ``play()`` and starts the timer.
+        Volume is synced by ``_poll_playback`` on the first confirmed-playing
+        tick rather than here, because ``play()`` is asynchronous and the
+        audio output is not ready until ``State.Playing`` is reached.
+        """
         if self._player is None:
             return
         try:
@@ -227,12 +264,27 @@ class AudioPreviewWidget(QWidget):
             self._status_label.setText(f"Playback error: {exc}")
 
     def _on_stop(self) -> None:
+        """Stop playback and reset the seek slider to the beginning.
+
+        Connected to the Stop button. Delegates to ``_stop_playback`` and
+        then resets the position UI so the next press of Play starts from
+        the beginning of the file.
+        """
         self._stop_playback()
         self._seek_slider.setValue(0)
         self._time_label.setText("0:00")
 
     def _on_seek_moved(self, value: int) -> None:
-        """Seek to position when the user drags the slider."""
+        """Seek to the position indicated by the slider when the user drags it.
+
+        Connected to ``QSlider.sliderMoved`` (not ``valueChanged``) so that
+        programmatic updates from the poll timer do not trigger a seek. Sets
+        ``_updating_seek`` while the VLC call is in progress to suppress the
+        poll timer's position update for that tick.
+
+        Args:
+            value: Slider position in the range ``[0, 1000]``.
+        """
         if self._player is None:
             return
         self._updating_seek = True
@@ -244,6 +296,16 @@ class AudioPreviewWidget(QWidget):
             self._updating_seek = False
 
     def _on_volume_changed(self, value: int) -> None:
+        """Apply the new volume level from the slider.
+
+        ``audio_set_volume()`` is only safe once the VLC audio output exists,
+        which is not until ``State.Playing`` is reached. If the player is in
+        any other state, ``_volume_dirty`` is set so that ``_poll_playback``
+        applies the change on the next confirmed-playing tick.
+
+        Args:
+            value: New volume level in the range ``[0, 100]``.
+        """
         # Only safe to call once the audio output exists (State.Playing).
         # When paused or stopped, the change is picked up by _poll_playback
         # on the next play() via _volume_dirty.
@@ -262,6 +324,13 @@ class AudioPreviewWidget(QWidget):
     # ------------------------------------------------------------------
 
     def _stop_playback(self) -> None:
+        """Stop the VLC player and halt the poll timer.
+
+        Safe to call at any point, including before ``load()`` has been called
+        (player is ``None``). Resets the Play button label but does not clear
+        the seek slider or time label; callers are responsible for that if
+        needed.
+        """
         self._timer.stop()
         if self._player is not None:
             try:
@@ -271,7 +340,13 @@ class AudioPreviewWidget(QWidget):
         self._play_btn.setText("Play")
 
     def _poll_playback(self) -> None:
-        """Update seek slider and time label; stop the timer when playback ends."""
+        """Update the seek slider and time label; stop the timer when playback ends.
+
+        Called every ``_POLL_INTERVAL_MS`` milliseconds while the play timer
+        is active. Exits early for any state other than ``State.Playing`` or
+        ``State.Ended``. On the first ``State.Playing`` tick, applies any
+        pending volume change via ``_volume_dirty`` before updating position.
+        """
         if self._player is None:
             return
         try:
