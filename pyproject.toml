@@ -1,9 +1,20 @@
 [project]
 name = "echofinder"
 version = "0.1.0"
-description = "Add your description here"
+description = "Cross-platform desktop file manager with background duplicate detection and rich file previewing"
 readme = "README.md"
 requires-python = ">=3.11"
+authors = [
+    { name = "Scott Michael Slayback", email = "Scott.M.Slayback@gmail.com" },
+]
+keywords = [
+    "file-manager",
+    "duplicate-detection",
+    "pdf-preview",
+    "epub-preview",
+    "cross-platform",
+    "pyqt6",
+]
 dependencies = [
     "charset-normalizer>=3.4.7",
     "pillow>=12.2.0",
