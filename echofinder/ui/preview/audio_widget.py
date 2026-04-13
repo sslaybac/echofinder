@@ -47,9 +47,11 @@ class AudioPreviewWidget(QWidget):
 
         self._instance: object | None = None   # vlc.Instance
         self._player: object | None = None     # vlc.MediaPlayer
+        self._media: object | None = None      # vlc.Media — kept alive to prevent GC crash
         self._current_path: Path | None = None
         self._duration_ms: int = 0
         self._updating_seek = False            # guard: suppress slider feedback loop
+        self._volume_dirty = True              # sync volume on next confirmed Playing state
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 24, 24, 24)
@@ -157,19 +159,27 @@ class AudioPreviewWidget(QWidget):
         self._duration_ms = 0
         self._duration_label.setText("0:00")
         self._play_btn.setText("Play")
+        self._volume_dirty = True  # re-sync volume on next confirmed Playing state
 
         if not _VLC_AVAILABLE:
             return
 
         try:
             if self._instance is None:
-                self._instance = _vlc.Instance()
+                # --no-video / --no-xlib: suppress video output and X11 init;
+                # required to avoid a segfault when VLC runs inside a Qt app on Linux.
+                self._instance = _vlc.Instance("--no-video", "--no-xlib")  # type: ignore[union-attr]
             if self._player is None:
                 self._player = self._instance.media_player_new()  # type: ignore[union-attr]
 
-            media = self._instance.media_new(str(path))  # type: ignore[union-attr]
-            self._player.set_media(media)  # type: ignore[union-attr]
-            self._player.audio_set_volume(self._vol_slider.value())  # type: ignore[union-attr]
+            # Keep a reference to the Media object for the lifetime of playback.
+            # VLC's C layer holds a raw pointer; if Python GC collects the object
+            # the pointer becomes dangling and the process crashes immediately.
+            self._media = self._instance.media_new(str(path))  # type: ignore[union-attr]
+            self._player.set_media(self._media)  # type: ignore[union-attr]
+            # Do NOT call audio_set_volume() here: the VLC audio output is created
+            # lazily on the first play() call, so calling it before play() crashes
+            # with a null-pointer dereference inside libvlc (VLC 3.x bug).
         except Exception as exc:
             self._status_label.setText(f"Could not load file: {exc}")
             self._play_btn.setEnabled(False)
@@ -181,11 +191,7 @@ class AudioPreviewWidget(QWidget):
     def release(self) -> None:
         """Stop playback and release the current media without destroying VLC."""
         self._stop_playback()
-        if self._player is not None:
-            try:
-                self._player.set_media(None)  # type: ignore[union-attr]
-            except Exception:
-                pass
+        self._media = None   # release Python reference; VLC player retains its own
         self._current_path = None
         self._name_label.setText("")
         self._status_label.setText("")
@@ -212,6 +218,9 @@ class AudioPreviewWidget(QWidget):
                 self._timer.stop()
             else:
                 self._player.play()  # type: ignore[union-attr]
+                # Do NOT call audio_set_volume() here: play() is asynchronous and
+                # the audio output is not yet ready. Volume is synced by the poll
+                # timer once State.Playing is confirmed.
                 self._play_btn.setText("Pause")
                 self._timer.start()
         except Exception as exc:
@@ -235,9 +244,16 @@ class AudioPreviewWidget(QWidget):
             self._updating_seek = False
 
     def _on_volume_changed(self, value: int) -> None:
+        # Only safe to call once the audio output exists (State.Playing).
+        # When paused or stopped, the change is picked up by _poll_playback
+        # on the next play() via _volume_dirty.
         if self._player is not None:
             try:
-                self._player.audio_set_volume(value)  # type: ignore[union-attr]
+                state = self._player.get_state()  # type: ignore[union-attr]
+                if state == _vlc.State.Playing:  # type: ignore[union-attr]
+                    self._player.audio_set_volume(value)  # type: ignore[union-attr]
+                else:
+                    self._volume_dirty = True
             except Exception:
                 pass
 
@@ -266,6 +282,14 @@ class AudioPreviewWidget(QWidget):
                 self._seek_slider.setValue(0)
                 self._time_label.setText("0:00")
                 return
+
+            if state != _vlc.State.Playing:  # type: ignore[union-attr]
+                return
+
+            # Audio output is confirmed ready — apply any pending volume change.
+            if self._volume_dirty:
+                self._player.audio_set_volume(self._vol_slider.value())  # type: ignore[union-attr]
+                self._volume_dirty = False
 
             if self._updating_seek:
                 return
