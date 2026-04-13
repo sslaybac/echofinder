@@ -71,24 +71,40 @@ is embedded in a dedicated `QFrame` render surface within the widget.
 stored as `self._media` for the lifetime of playback (same GC safety constraint as
 the audio widget).
 
-**Render surface** — `self._surface` is a `QFrame` with `WA_NativeWindow` set to
-guarantee a real native window handle. `WA_DontCreateNativeAncestors` prevents Qt
-from forcibly nativizing the entire widget ancestor chain.
+**Render surface** — `self._surface` is a `QFrame`. `WA_NativeWindow` and
+`WA_DontCreateNativeAncestors` are applied lazily in `_attach_surface()`, not in
+`__init__`. Setting them at construction forces Qt to create an X11 sub-window
+immediately; on Wayland (even via XWayland) the compositor decorates this sub-window
+with its own title bar, produces edge flickering, and causes event-loop deadlocks —
+all before any video file is ever selected.
 
-**Surface wiring** — `set_xwindow` (Linux) / `set_hwnd` (Windows) is called in
-`_on_play_pause` immediately before each `play()` call, at which point the stack has
-already switched to this widget and the surface is guaranteed to be visible.
+**Surface wiring and platform detection** — `_attach_surface()` is called in
+`_on_play_pause` immediately before each `play()` call. It checks
+`QGuiApplication.platformName()` at that point to determine the active platform:
+- **X11 (`xcb`)**: applies `WA_NativeWindow`, calls `set_xwindow(winId())`.
+- **Windows**: calls `set_hwnd(winId())`.
+- **Wayland**: skips window embedding entirely; shows an informational label in
+  `_surface` instead.
 
 **Volume safety** — same `_volume_dirty` pattern as the audio widget.
 
+**Poll timer terminal states** — `_poll_playback` handles `State.Stopped` and
+`State.Error` in addition to `State.Ended`. On Wayland, when the user closes VLC's
+external window, VLC transitions to `State.Stopped` (not `State.Ended`); handling
+only `State.Ended` left the Play button stuck showing "Pause" indefinitely.
+
 **Wayland decision (Decisions Log)** — Alma Linux 9 dev machine runs Wayland
-(`XDG_SESSION_TYPE=wayland`) with XWayland available (`DISPLAY=:0`). Qt's default
-platform on this machine is Wayland; VLC's `set_xwindow()` requires X11. Tested and
-confirmed: Echofinder must be launched under the Wayland platform (default) and VLC
-will use XWayland for video embedding via `DISPLAY=:0`. If X11 embedding does not
-produce video on a given Wayland setup, setting `QT_QPA_PLATFORM=xcb` forces Qt into
-X11 mode (requires `xcb-cursor` / `libxcb-cursor0` to be installed). On this machine
-that package is not present so only Wayland-platform launch is supported.
+(`XDG_SESSION_TYPE=wayland`). Qt's default platform is `wayland`; VLC's
+`set_xwindow()` requires a valid X11 window ID, but `winId()` in Wayland mode
+returns a Wayland surface handle. VLC rejects it ("bad X11 window"), falls back to
+its own top-level window, and the compositor treats that as a separate application
+window. Confirmed by libvlc's own diagnostic: "Pass `--no-xlib` to libvlc_new() to
+fix this." Fix: detect Wayland via `platformName()`, initialise VLC with `--no-xlib`,
+skip `set_xwindow`. VLC plays in its own window; all playback controls remain
+functional via the python-vlc API. `xcb-cursor` / `libxcb-cursor0` (required for
+`QT_QPA_PLATFORM=xcb`) is not installed on this machine, so forcing X11 mode is not
+available. Video embedding will work correctly on Windows and on Linux machines where
+Qt runs in X11 (`xcb`) mode.
 
 ## Settled Design Decisions
 The following decisions were made deliberately after evaluating alternatives. Do not
