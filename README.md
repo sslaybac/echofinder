@@ -33,7 +33,7 @@ instantly.
   - PDF files are rendered inline with multi-page scroll and zoom support.
   - Audio files are played back inline with play/pause, stop, seek, and
     volume controls. VLC must be installed on the host system.
-  - Video playback is not yet implemented and will be added in a subsequent stage.
+  - Video files are played back inline with the same controls as audio.
 
 - **Metadata panel** — Displays the SHA-256 hash, MIME type, programming language,
   character encoding, and duplicate count for the selected file. The duplicates row
@@ -64,6 +64,7 @@ instantly.
 | File type detection      | python-magic             | MIME type via libmagic                     |
 | PDF rendering            | PyMuPDF (fitz)           | Multi-page preview with zoom               |
 | Audio playback           | python-vlc               | Wraps libvlc; VLC must be installed        |
+| Video playback           | PyQt6.QtMultimedia       | FFmpeg backend; no additional install      |
 | Syntax highlighting      | Pygments                 | 500+ languages                             |
 | Encoding detection       | charset-normalizer       | Automatic detection for non-UTF-8 text     |
 | Config file paths        | platformdirs             | OS-appropriate locations                   |
@@ -114,17 +115,6 @@ uv run python -m echofinder
 
 The application window opens. Click **Open Folder...** in the toolbar (or press the
 button in the empty state view) to choose a root directory and begin exploring.
-
----
-
-## Not Yet Implemented
-
-The following preview types are planned and will be added in subsequent stages:
-
-- **Video playback** (Stage 10) — inline video with playback controls
-
-Files of this type currently show an "unsupported format" placeholder in the preview
-pane.
 
 ---
 

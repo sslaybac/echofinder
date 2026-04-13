@@ -6,7 +6,7 @@
 - **uv** — [installation instructions](https://docs.astral.sh/uv/getting-started/installation/)
 - **libmagic** (Linux only) — `sudo dnf install file-libs` (Alma/RHEL/Fedora) or
   `sudo apt install libmagic1` (Debian/Ubuntu)
-- **VLC** — required for audio (and video, Stage 10) playback:
+- **VLC** — required for audio playback:
   - Linux: `sudo dnf install vlc` or `sudo apt install vlc`
   - Windows: install from [videolan.org](https://www.videolan.org/)
 
