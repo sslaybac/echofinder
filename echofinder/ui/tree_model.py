@@ -441,6 +441,73 @@ class FileTreeModel(QAbstractItemModel):
             self._active_hash = None
 
     # ------------------------------------------------------------------
+    # Polling support (Stage 7)
+    # ------------------------------------------------------------------
+
+    def get_polling_snapshot(self) -> frozenset[str]:
+        """Return the current set of loaded paths for the polling engine.
+
+        Called from the main thread; the returned frozenset is passed to
+        PollingEngine.update_known_paths() before each poll cycle.
+        """
+        return frozenset(self._path_to_node.keys())
+
+    @pyqtSlot(list)
+    def on_entries_removed(self, paths: list[str]) -> None:
+        """Handle paths detected as removed by the polling engine.
+
+        Updates hash tracking for each removed path, then refreshes the
+        affected parent directories so the tree reflects the deletion.
+        """
+        parents: set[Path] = set()
+        for path_str in paths:
+            self.notify_path_removed(path_str)
+            parents.add(Path(path_str).parent)
+        for parent in parents:
+            self.refresh_dir(parent)
+
+    @pyqtSlot(list)
+    def on_entries_changed(self, paths: list[str]) -> None:
+        """Handle files detected as changed by the polling engine.
+
+        Removes stale hash data and resets each affected node's slot-4
+        indicator to NOT_HASHED (hourglass) so the user sees that re-hashing
+        is in progress.  When re-hashing completes, on_file_hashed restores
+        the correct state.
+
+        If removing a changed path reduces a duplicate group to a single
+        remaining member, that member is promoted back to UNIQUE.
+        """
+        for path_str in paths:
+            # Remove from hash tracking so the stale duplicate grouping is
+            # cleared before the new hash arrives.
+            old_hash = self._path_to_hash.pop(path_str, None)
+            if old_hash is not None:
+                group = self._hash_to_paths.get(old_hash)
+                if group is not None:
+                    group.discard(path_str)
+                    # A group of exactly one is no longer a duplicate group.
+                    if len(group) == 1:
+                        for other_path in group:
+                            other_node = self._path_to_node.get(other_path)
+                            if other_node is not None and other_node.hash_state in (
+                                HashState.DUPLICATE_GENERAL,
+                                HashState.DUPLICATE_SPECIFIC,
+                            ):
+                                other_node.hash_state = HashState.UNIQUE
+                                self._emit_slot4_changed(other_node)
+            # Clear active-hash tracking if the changed file was the active file.
+            if self._active_path == path_str and old_hash is not None:
+                self._active_hash = None
+
+            # Reset slot-4 to hourglass on the loaded node (if any).
+            node = self._path_to_node.get(path_str)
+            if node is not None and node.hash_state != HashState.RENAME_CONFLICT:
+                if not node.is_dir and not node.is_symlink:
+                    node.hash_state = HashState.NOT_HASHED
+                    self._emit_slot4_changed(node)
+
+    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 

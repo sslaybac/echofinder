@@ -214,3 +214,32 @@ class HashingEngine(QThread):
             self.hashing_cancelled.emit()
         else:
             self.hashing_complete.emit()
+
+    def rehash_paths(self, paths: list[str]) -> None:
+        """Submit specific files for re-hashing via the global thread pool.
+
+        Used by the polling engine after it detects that a file's size or mtime
+        has changed since it was last hashed.  Each file is submitted as an
+        independent task; progress tracking is not updated (these are minor
+        incremental re-hashes, not a full scan).
+        """
+        pool = QThreadPool.globalInstance()
+        for path_str in paths:
+            def make_callback(p: str):
+                def on_done(
+                    is_cache_hit: bool,
+                    hash_val: str | None,
+                    ft: str | None,
+                    lang: str | None,
+                ) -> None:
+                    if hash_val:
+                        self.file_hashed.emit(p, hash_val, ft or "", lang or "")
+                return on_done
+
+            task = _HashTask(
+                path_str,
+                self._cache,
+                make_callback(path_str),
+                lambda: False,  # individual rehash tasks are never cancelled mid-run
+            )
+            pool.start(task)

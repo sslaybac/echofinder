@@ -158,6 +158,32 @@ class HashCache:
         except sqlite3.Error:
             pass
 
+    def get_cached_stat(self, path: str) -> tuple[int, float] | None:
+        """Return the cached (size, mtime) for *path*, or None if not cached.
+
+        Used by the polling engine to detect files that have changed on disk
+        since they were last hashed.
+        """
+        try:
+            with self._lock:
+                cur = self._conn.execute(
+                    "SELECT size, mtime FROM files WHERE path=?",
+                    (path,),
+                )
+                row = cur.fetchone()
+            return (row[0], row[1]) if row else None
+        except sqlite3.Error:
+            return None
+
+    def remove_path(self, path: str) -> None:
+        """Delete the cache entry for *path* (used when polling detects a removal)."""
+        try:
+            with self._lock:
+                self._conn.execute("DELETE FROM files WHERE path=?", (path,))
+                self._conn.commit()
+        except sqlite3.Error:
+            pass
+
     def close(self) -> None:
         try:
             with self._lock:

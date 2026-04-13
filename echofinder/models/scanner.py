@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -15,8 +16,14 @@ from echofinder.services.file_type import FileTypeResolver
 
 # Cache current user's UID and supplemental GIDs at import time.
 # These are stable for the lifetime of the process on any normal Unix system.
-_CURRENT_UID: int = os.getuid()
-_CURRENT_GIDS: frozenset[int] = frozenset(os.getgroups())
+# os.getuid() / os.getgroups() are POSIX-only; on Windows ownership indicators
+# are not shown (all files resolve to OwnershipState.NEITHER).
+if sys.platform != "win32":
+    _CURRENT_UID: int = os.getuid()
+    _CURRENT_GIDS: frozenset[int] = frozenset(os.getgroups())
+else:
+    _CURRENT_UID = -1
+    _CURRENT_GIDS: frozenset[int] = frozenset()
 
 
 def walk_files(root: Path) -> Iterator[Path]:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from PyQt6.QtCore import QModelIndex, Qt
@@ -17,6 +18,7 @@ from echofinder.models.hash_cache import HashCache
 from echofinder.models.session import SessionState
 from echofinder.services.file_type import FileTypeResolver
 from echofinder.services.hashing_engine import HashingEngine
+from echofinder.services.polling_engine import PollingEngine
 from echofinder.ui.file_tree_view import FileTreeView
 from echofinder.ui.metadata_panel import MetadataPanel
 from echofinder.ui.preview_pane import PreviewPane
@@ -39,8 +41,12 @@ class MainWindow(QMainWindow):
         self._progress_bar: QProgressBar | None = None
         self._progress_label: QLabel | None = None
 
+        # Polling infrastructure (Stage 7)
+        self._polling_engine = PollingEngine(self._hash_cache)
+
         self._build_ui()
         self._connect_engine_signals()
+        self._connect_polling_signals()
 
         # Warn the user if the cache was corrupted and reset on startup
         if self._hash_cache.was_reset:
@@ -123,6 +129,67 @@ class MainWindow(QMainWindow):
         self._hashing_engine.file_hashed.connect(self._metadata_panel.on_file_hashed)
 
     # ------------------------------------------------------------------
+    # Polling engine signal connections
+    # ------------------------------------------------------------------
+
+    def _connect_polling_signals(self) -> None:
+        self._polling_engine.entries_removed.connect(self._on_entries_removed)
+        self._polling_engine.entries_added.connect(self._on_entries_added)
+        self._polling_engine.entries_changed.connect(self._on_entries_changed)
+
+    # ------------------------------------------------------------------
+    # Polling engine slots (called on main thread via queued connection)
+    # ------------------------------------------------------------------
+
+    def _on_entries_removed(self, paths: list) -> None:
+        """Remove paths from the tree and hash cache after polling detects deletion."""
+        if self._tree_model is None:
+            return
+        self._tree_model.on_entries_removed(paths)
+        # Prune deleted paths from the persistent hash cache.
+        for path_str in paths:
+            self._hash_cache.remove_path(path_str)
+        # Refresh polling snapshot since the tree has changed.
+        self._refresh_polling_snapshot()
+
+    def _on_entries_added(self, paths: list) -> None:
+        """Refresh affected directories and queue new files for hashing."""
+        if self._tree_model is None:
+            return
+        # Refresh every parent directory that is currently loaded so the new
+        # entries appear in the tree.  refresh_dir() is a no-op for unloaded
+        # parents; those entries will appear naturally when the user expands.
+        parents: set[Path] = set()
+        new_files: list[str] = []
+        for path_str in paths:
+            parents.add(Path(path_str).parent)
+            # Queue regular files (not dirs or symlinks) for hashing.
+            try:
+                if not os.path.isdir(path_str) and not os.path.islink(path_str):
+                    new_files.append(path_str)
+            except OSError:
+                pass
+        for parent in parents:
+            self._tree_model.refresh_dir(parent)
+        if new_files:
+            self._hashing_engine.rehash_paths(new_files)
+        self._refresh_polling_snapshot()
+
+    def _on_entries_changed(self, paths: list) -> None:
+        """Reset hash state for changed files and queue them for re-hashing."""
+        if self._tree_model is None:
+            return
+        self._tree_model.on_entries_changed(paths)
+        self._hashing_engine.rehash_paths(list(paths))
+
+    def _refresh_polling_snapshot(self) -> None:
+        """Push the current loaded-path snapshot to the polling engine."""
+        if self._tree_model is not None:
+            self._polling_engine.update_known_paths(
+                self._tree_model.get_polling_snapshot()
+            )
+
+    # ------------------------------------------------------------------
     # Session restore
     # ------------------------------------------------------------------
 
@@ -149,6 +216,12 @@ class MainWindow(QMainWindow):
             self._set_root(Path(folder), restore_expansion=False)
 
     def _set_root(self, path: Path, *, restore_expansion: bool) -> None:
+        # Interrupt any in-progress polling cycle for the old root.
+        # start_polling() at the end of this method will restart the cycle for
+        # the new root.  We do NOT call stop() here because stop() terminates
+        # the thread permanently; start_polling() uses _wake.set() to abort any
+        # in-progress cycle and reset the interval, which is all we need.
+
         # Cancel any in-progress hashing before switching roots
         if self._hashing_engine.isRunning():
             self._hashing_engine.cancel()
@@ -158,7 +231,9 @@ class MainWindow(QMainWindow):
         if self._tree_model is not None:
             try:
                 self._tree_view.expanded.disconnect(self._save_expansion_state)
+                self._tree_view.expanded.disconnect(self._refresh_polling_snapshot)
                 self._tree_view.collapsed.disconnect(self._save_expansion_state)
+                self._tree_view.collapsed.disconnect(self._refresh_polling_snapshot)
                 self._tree_view.selectionModel().currentChanged.disconnect(
                     self._on_selection_changed
                 )
@@ -188,7 +263,9 @@ class MainWindow(QMainWindow):
 
         # Connect signals after model is set
         self._tree_view.expanded.connect(self._save_expansion_state)
+        self._tree_view.expanded.connect(self._refresh_polling_snapshot)
         self._tree_view.collapsed.connect(self._save_expansion_state)
+        self._tree_view.collapsed.connect(self._refresh_polling_snapshot)
         self._tree_view.selectionModel().currentChanged.connect(
             self._on_selection_changed
         )
@@ -199,6 +276,13 @@ class MainWindow(QMainWindow):
 
         # Start background hashing for the new root
         self._hashing_engine.start_hashing(path)
+
+        # Start the polling cycle for the new root.  Provide an initial
+        # snapshot of loaded paths (just the root's eager-loaded children).
+        self._polling_engine.update_known_paths(
+            self._tree_model.get_polling_snapshot()
+        )
+        self._polling_engine.start_polling(path)
 
     # ------------------------------------------------------------------
     # Hashing engine slots (called on main thread via queued connection)
@@ -334,6 +418,10 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def closeEvent(self, event) -> None:
+        # Stop the polling engine first so no signals fire after shutdown.
+        if self._polling_engine.isRunning():
+            self._polling_engine.stop()
+            self._polling_engine.wait(5000)
         if self._hashing_engine.isRunning():
             self._hashing_engine.cancel()
             self._hashing_engine.wait(5000)
