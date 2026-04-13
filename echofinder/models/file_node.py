@@ -6,6 +6,12 @@ from pathlib import Path
 
 
 class FileType(Enum):
+    """Classification of a filesystem entry for display and preview routing.
+
+    Values are used as the primary dispatch key in ``PreviewPane.show_for_node``
+    and in the slot-1 icon lookup in ``icons.icon_for_type``.
+    """
+
     FOLDER = auto()
     IMAGE = auto()
     VIDEO = auto()
@@ -48,6 +54,24 @@ class HashState(Enum):
 
 @dataclass
 class FileNode:
+    """A single node in the file tree, representing one filesystem entry.
+
+    Instances are created by ``scanner.scan_directory`` and stored as
+    ``children`` lists on their parent nodes.  The tree model holds a flat
+    ``_path_to_node`` index for O(1) lookups by path string.
+
+    Attributes:
+        path: Absolute ``Path`` to this entry.
+        file_type: Classification used for slot-1 icon and preview routing.
+        parent: Parent ``FileNode``, or ``None`` for the root.
+        row: Zero-based index of this node within its parent's ``children``.
+        ownership: Slot-2 indicator: how the current user owns this entry.
+        permission: Slot-3 indicator: the current user's read/write access.
+        hash_state: Slot-4 indicator: hashing / duplicate status.
+        prior_hash_state: Saved slot-4 state restored when rename mode exits.
+        children: Loaded child nodes, or ``None`` if not yet fetched.
+    """
+
     path: Path
     file_type: FileType
     parent: FileNode | None = field(default=None, repr=False, compare=False)
@@ -64,16 +88,36 @@ class FileNode:
 
     @property
     def name(self) -> str:
+        """Display name: the final path component, or the full path for the root.
+
+        Returns:
+            A non-empty string suitable for display in the tree view.
+        """
         return self.path.name if self.path.name else str(self.path)
 
     @property
     def is_dir(self) -> bool:
+        """Return ``True`` if this node represents a directory.
+
+        Returns:
+            ``True`` for ``FileType.FOLDER`` nodes.
+        """
         return self.file_type == FileType.FOLDER
 
     @property
     def is_symlink(self) -> bool:
+        """Return ``True`` if this node represents a symbolic link.
+
+        Returns:
+            ``True`` for ``SYMLINK_INTERNAL`` and ``SYMLINK_EXTERNAL`` nodes.
+        """
         return self.file_type in (FileType.SYMLINK_INTERNAL, FileType.SYMLINK_EXTERNAL)
 
     @property
     def children_loaded(self) -> bool:
+        """Return ``True`` if ``fetchMore`` has already populated ``children``.
+
+        Returns:
+            ``True`` when ``children`` is a list (even if empty).
+        """
         return self.children is not None

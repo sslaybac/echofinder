@@ -41,7 +41,29 @@ from echofinder.ui.node_delegate import SLOT2_ROLE, SLOT3_ROLE, SLOT4_ROLE
 
 
 class FileTreeModel(QAbstractItemModel):
+    """``QAbstractItemModel`` backing the file tree view with four-slot indicators.
+
+    Nodes are loaded lazily via ``canFetchMore`` / ``fetchMore``.  Duplicate-group
+    tracking is maintained in ``_path_to_hash`` / ``_hash_to_paths`` and updated
+    each time a ``file_hashed`` signal arrives from the hashing engine.
+
+    Attributes:
+        _resolver: ``FileTypeResolver`` forwarded to ``scan_directory``.
+        _root: Root ``FileNode``, or ``None`` before ``set_root`` is called.
+        _path_to_node: Maps path strings to loaded ``FileNode`` objects.
+        _path_to_hash: Maps path strings to their SHA-256 hash.
+        _hash_to_paths: Maps SHA-256 hashes to the set of paths sharing them.
+        _active_path: Path of the currently selected file (for DUPLICATE_SPECIFIC).
+        _active_hash: Hash of the currently selected file.
+    """
+
     def __init__(self, resolver: FileTypeResolver, parent=None) -> None:
+        """Initialise the model with an empty root.
+
+        Args:
+            resolver: Shared ``FileTypeResolver`` instance.
+            parent: Optional Qt parent object.
+        """
         super().__init__(parent)
         self._resolver = resolver
         self._root: FileNode | None = None
@@ -62,6 +84,16 @@ class FileTreeModel(QAbstractItemModel):
     # ------------------------------------------------------------------
 
     def set_root(self, path: Path) -> None:
+        """Reset the model and set *path* as the new root directory.
+
+        Clears all per-root state (path index, hash tracking, active file)
+        and eagerly loads the root's direct children so the tree is not empty
+        immediately after the root is set.
+
+        Args:
+            path: Absolute ``Path`` to the directory that will become the
+                tree root.
+        """
         self.beginResetModel()
         self._root = FileNode(path=path, file_type=FileType.FOLDER)
         # Clear all per-root state
@@ -76,6 +108,11 @@ class FileTreeModel(QAbstractItemModel):
             self.fetchMore(QModelIndex())
 
     def root_path(self) -> Path | None:
+        """Return the root directory ``Path``, or ``None`` if no root is set.
+
+        Returns:
+            The root ``Path``, or ``None``.
+        """
         return self._root.path if self._root else None
 
     def index_for_path(self, path: Path) -> QModelIndex:
@@ -206,6 +243,17 @@ class FileTreeModel(QAbstractItemModel):
     # ------------------------------------------------------------------
 
     def index(self, row: int, col: int, parent: QModelIndex = QModelIndex()) -> QModelIndex:
+        """Return the model index for the child at (*row*, *col*) under *parent*.
+
+        Args:
+            row: Row within *parent*.
+            col: Column (always 0 in this single-column model).
+            parent: Parent index; invalid index means the root.
+
+        Returns:
+            A valid ``QModelIndex`` wrapping the ``FileNode``, or an invalid
+            index if the position is out of range.
+        """
         if not self.hasIndex(row, col, parent):
             return QModelIndex()
         parent_node = self._root if not parent.isValid() else parent.internalPointer()
@@ -216,6 +264,14 @@ class FileTreeModel(QAbstractItemModel):
         return QModelIndex()
 
     def parent(self, index: QModelIndex) -> QModelIndex:  # type: ignore[override]
+        """Return the parent index of *index*.
+
+        Args:
+            index: The child index whose parent is requested.
+
+        Returns:
+            The parent ``QModelIndex``, or an invalid index for top-level items.
+        """
         if not index.isValid():
             return QModelIndex()
         node: FileNode = index.internalPointer()
@@ -225,6 +281,14 @@ class FileTreeModel(QAbstractItemModel):
         return self.createIndex(parent_node.row, 0, parent_node)
 
     def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        """Return the number of loaded children under *parent*.
+
+        Args:
+            parent: Parent index; invalid means the root.
+
+        Returns:
+            Number of loaded child rows, or 0 if children are not yet fetched.
+        """
         if parent.column() > 0:
             return 0
         node = self._root if not parent.isValid() else parent.internalPointer()
@@ -233,9 +297,29 @@ class FileTreeModel(QAbstractItemModel):
         return len(node.children)
 
     def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        """Return 1; this is a single-column model.
+
+        Args:
+            parent: Unused.
+
+        Returns:
+            Always ``1``.
+        """
         return 1
 
     def hasChildren(self, parent: QModelIndex = QModelIndex()) -> bool:
+        """Return whether *parent* has (or may have) child rows.
+
+        Returns ``True`` for unloaded directories so the expand arrow is shown
+        before ``fetchMore`` is called.
+
+        Args:
+            parent: The index to test.
+
+        Returns:
+            ``True`` if the item is a directory with at least one child, or
+            if it is an unloaded directory (assumed non-empty).
+        """
         if not parent.isValid():
             return self._root is not None
         node: FileNode = parent.internalPointer()
@@ -246,6 +330,14 @@ class FileTreeModel(QAbstractItemModel):
         return True  # Unloaded directory — assume it has children
 
     def canFetchMore(self, parent: QModelIndex) -> bool:
+        """Return ``True`` if *parent* is a directory whose children are not yet loaded.
+
+        Args:
+            parent: The index to check.
+
+        Returns:
+            ``True`` when the node is an unloaded directory.
+        """
         node = self._root if not parent.isValid() else (
             parent.internalPointer() if parent.isValid() else None
         )
@@ -256,6 +348,14 @@ class FileTreeModel(QAbstractItemModel):
         return not node.children_loaded
 
     def fetchMore(self, parent: QModelIndex) -> None:
+        """Load and insert the children of *parent* into the model.
+
+        Called by the view when the user expands a directory.  Children are
+        scanned via ``scan_directory`` and registered in the path index.
+
+        Args:
+            parent: The directory index to expand.
+        """
         node = self._root if not parent.isValid() else parent.internalPointer()
         if node is None or node.children_loaded:
             return
@@ -274,6 +374,19 @@ class FileTreeModel(QAbstractItemModel):
                 self.dataChanged.emit(parent, parent, [])
 
     def data(self, index: QModelIndex, role: int = Qt.ItemDataRole.DisplayRole):
+        """Return data for *index* under *role*.
+
+        Handles ``DisplayRole`` (filename), ``DecorationRole`` (slot-1 icon),
+        and the three custom slot roles for ownership, permission, and hash
+        state indicators.
+
+        Args:
+            index: The model index to query.
+            role: Qt item data role constant.
+
+        Returns:
+            The requested data, or ``None`` if the role is not handled.
+        """
         if not index.isValid():
             return None
         node: FileNode = index.internalPointer()
@@ -305,6 +418,17 @@ class FileTreeModel(QAbstractItemModel):
         return None
 
     def flags(self, index: QModelIndex) -> Qt.ItemFlag:
+        """Return item flags for *index*.
+
+        All valid items are enabled, selectable, draggable, and editable
+        (for rename).  Directories additionally accept drops.
+
+        Args:
+            index: The item to query.
+
+        Returns:
+            The combined ``Qt.ItemFlag`` value for the item.
+        """
         if not index.isValid():
             # Allow drops on the viewport background (between all items)
             return Qt.ItemFlag.ItemIsDropEnabled
@@ -324,6 +448,14 @@ class FileTreeModel(QAbstractItemModel):
     # ------------------------------------------------------------------
 
     def _scan_children(self, node: FileNode) -> list[FileNode]:
+        """Delegate to ``scanner.scan_directory`` using the current root path.
+
+        Args:
+            node: The directory node whose children should be scanned.
+
+        Returns:
+            Sorted list of child ``FileNode`` objects.
+        """
         root_path = self._root.path if self._root else None
         return scan_directory(node, root_path, self._resolver)
 

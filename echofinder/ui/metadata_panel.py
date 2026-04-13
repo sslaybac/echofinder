@@ -32,6 +32,13 @@ class MetadataPanel(QWidget):
     navigate_to_path = pyqtSignal(object)  # Path; forwarded to MainWindow
 
     def __init__(self, hash_cache: HashCache, parent: QWidget | None = None) -> None:
+        """Construct the metadata panel and hide it until a file is selected.
+
+        Args:
+            hash_cache: Shared cache used to look up hash, type, language,
+                and duplicate paths for the currently displayed file.
+            parent: Optional Qt parent widget.
+        """
         super().__init__(parent)
         self._hash_cache = hash_cache
         self._current_path: str | None = None
@@ -46,6 +53,7 @@ class MetadataPanel(QWidget):
     # ------------------------------------------------------------------
 
     def _build_ui(self) -> None:
+        """Create the form layout with hash, type, language, encoding, and duplicates rows."""
         outer = QVBoxLayout(self)
         outer.setContentsMargins(8, 6, 8, 6)
         outer.setSpacing(0)
@@ -158,6 +166,13 @@ class MetadataPanel(QWidget):
     # ------------------------------------------------------------------
 
     def _apply_metadata(self, meta: dict) -> None:
+        """Populate all form fields from a metadata dict.
+
+        Args:
+            meta: Dict with optional keys ``'hash'``, ``'filetype'``,
+                and ``'language'``.  Missing or falsy values are shown
+                as ``'Unknown'``.
+        """
         hash_val: str | None = meta.get("hash")
         filetype: str | None = meta.get("filetype")
         language: str | None = meta.get("language")
@@ -181,6 +196,11 @@ class MetadataPanel(QWidget):
             self._dup_button.setEnabled(False)
 
     def _set_language(self, language: str | None) -> None:
+        """Show the language row with *language*, or hide it if falsy.
+
+        Args:
+            language: Detected programming language name, or ``None``.
+        """
         if language:
             self._lang_label.setText(language)
             self._lang_key.show()
@@ -190,10 +210,12 @@ class MetadataPanel(QWidget):
             self._lang_label.hide()
 
     def _set_duplicates_hashing(self) -> None:
+        """Show a 'Hashing…' placeholder in the duplicates row while hashing is pending."""
         self._dup_button.setText("Hashing\u2026")
         self._dup_button.setEnabled(False)
 
     def _show_duplicate_menu(self) -> None:
+        """Display a popup menu listing all duplicate paths as clickable actions."""
         if not self._dup_paths:
             return
         menu = QMenu(self)

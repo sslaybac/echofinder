@@ -46,6 +46,17 @@ class NodeIndicatorDelegate(QStyledItemDelegate):
         option: QStyleOptionViewItem,
         index,
     ) -> None:
+        """Paint one tree row with the four-slot indicator system.
+
+        Narrows the base-class rect so that Qt draws the type icon (slot 1)
+        and filename within the left portion, then manually draws slots 2–4
+        right-aligned in the reserved strip.
+
+        Args:
+            painter: Active ``QPainter`` for the viewport.
+            option: Style and geometry information for this row.
+            index: ``QModelIndex`` of the item being painted.
+        """
         # Narrow option.rect so that the base class draws text and slot-1 icon
         # within the left portion, leaving the right strip clear for our icons.
         original_rect = QRect(option.rect)
@@ -75,6 +86,15 @@ class NodeIndicatorDelegate(QStyledItemDelegate):
             x -= _SLOT_SIZE + _SLOT_SPACING
 
     def sizeHint(self, option: QStyleOptionViewItem, index) -> "QSize":  # type: ignore[override]
+        """Return the preferred size for *index*, widened for the slot strip.
+
+        Args:
+            option: Style options for the item.
+            index: ``QModelIndex`` of the item.
+
+        Returns:
+            A ``QSize`` with extra width reserved for the three right-side slots.
+        """
         hint = super().sizeHint(option, index)
         # Ensure items are wide enough to show all slots without clipping
         hint.setWidth(hint.width() + _RIGHT_RESERVE)

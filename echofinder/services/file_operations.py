@@ -18,12 +18,29 @@ ConflictAction = Literal["overwrite", "skip"]
 
 @dataclass
 class DeleteResult:
+    """Result of a ``delete_item`` operation.
+
+    Attributes:
+        success: ``True`` if the item was successfully trashed.
+        error_msg: Human-readable failure description, or ``None`` on success.
+    """
+
     success: bool
     error_msg: Optional[str] = None
 
 
 @dataclass
 class MoveResult:
+    """Result of a ``move_item`` or ``_do_merge`` operation.
+
+    Attributes:
+        success: ``True`` if the overall operation completed without a fatal
+            error.  A successful merge may still have per-file ``failures``.
+        failures: List of ``(path, reason)`` pairs for files that could not be
+            moved during a directory merge.
+        error_msg: Human-readable description of a fatal error, or ``None``.
+    """
+
     success: bool
     failures: list[tuple[str, str]] = field(default_factory=list)
     error_msg: Optional[str] = None
@@ -35,6 +52,13 @@ class MoveResult:
 
 @dataclass
 class RenameResult:
+    """Result of a ``rename_item`` operation.
+
+    Attributes:
+        success: ``True`` if the rename completed without error.
+        error_msg: Human-readable failure description, or ``None`` on success.
+    """
+
     success: bool
     error_msg: Optional[str] = None
 

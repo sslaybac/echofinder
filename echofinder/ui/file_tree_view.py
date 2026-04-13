@@ -84,6 +84,12 @@ class _GhostOverlay(QWidget):
         self.hide()
 
     def show_ghost(self, rect: QRect, collision: bool = False) -> None:
+        """Show the ghost at *rect* with a blue (normal) or red (collision) outline.
+
+        Args:
+            rect: The bounding rectangle to highlight, in viewport coordinates.
+            collision: When ``True``, draw a red outline to signal a merge conflict.
+        """
         self._rect = QRect(rect)
         self._collision = collision
         # QAbstractItemView::scrollContentsBy calls viewport()->scroll(dx, dy),
@@ -97,11 +103,13 @@ class _GhostOverlay(QWidget):
         self.update()
 
     def clear_ghost(self) -> None:
+        """Hide the ghost overlay and clear the stored rect."""
         self._rect = None
         self.hide()
         self.update()
 
     def paintEvent(self, event) -> None:  # type: ignore[override]
+        """Draw a semi-transparent fill and dashed outline at the ghost rect."""
         if self._rect is None:
             return
         painter = QPainter(self)
@@ -149,6 +157,14 @@ class RenameDelegate(NodeIndicatorDelegate):
     # ------------------------------------------------------------------
 
     def set_hidden_source(self, index: QModelIndex | None) -> None:
+        """Suppress painting of the row at *index* during keyboard movement mode.
+
+        The row remains in the model for navigation purposes; only the visual
+        rendering is suppressed so the ghost overlay is the sole representation.
+
+        Args:
+            index: The source row to hide, or ``None`` to stop hiding.
+        """
         self._hidden_persistent = (
             QPersistentModelIndex(index) if (index is not None and index.isValid()) else None
         )
@@ -158,6 +174,13 @@ class RenameDelegate(NodeIndicatorDelegate):
     # ------------------------------------------------------------------
 
     def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
+        """Paint the row, skipping it entirely if it is the concealed ghost source.
+
+        Args:
+            painter: Active ``QPainter`` for the viewport.
+            option: Style and geometry for this row.
+            index: ``QModelIndex`` of the item to paint.
+        """
         if self._hidden_persistent is not None:
             hidden = QModelIndex(self._hidden_persistent)
             if hidden.isValid() and index == hidden:
@@ -175,6 +198,16 @@ class RenameDelegate(NodeIndicatorDelegate):
     def createEditor(
         self, parent: QWidget, option: QStyleOptionViewItem, index: QModelIndex
     ) -> QWidget:
+        """Create a ``QLineEdit`` inline editor and set the editing flag.
+
+        Args:
+            parent: The viewport widget that parents the editor.
+            option: Style information for the row being edited.
+            index: The model index of the item being renamed.
+
+        Returns:
+            A ``QLineEdit`` pre-populated by ``setEditorData``.
+        """
         editor = QLineEdit(parent)
         self._editing = True
         self._current_editor = editor
@@ -182,6 +215,12 @@ class RenameDelegate(NodeIndicatorDelegate):
         return editor
 
     def setEditorData(self, editor: QWidget, index: QModelIndex) -> None:
+        """Pre-populate the editor with the current filename and select all text.
+
+        Args:
+            editor: The ``QLineEdit`` returned by ``createEditor``.
+            index: The model index of the item being edited.
+        """
         node: FileNode = index.internalPointer()
         le = editor  # type: ignore[assignment]
         le.setText(node.name)
@@ -190,10 +229,20 @@ class RenameDelegate(NodeIndicatorDelegate):
     def setModelData(
         self, editor: QWidget, model: QAbstractItemModel, index: QModelIndex
     ) -> None:
+        """No-op: rename logic is handled entirely in ``eventFilter``."""
         # Handled entirely in eventFilter; this is intentionally a no-op.
         pass
 
     def destroyEditor(self, editor: QWidget, index: QModelIndex) -> None:
+        """Tear down the editor and apply any pending rename after it is fully closed.
+
+        Model and cache updates are deferred via ``QTimer.singleShot(0, ...)``
+        so that editor teardown and any residual key events complete first.
+
+        Args:
+            editor: The editor widget to destroy.
+            index: The model index that was being edited.
+        """
         pending = self._pending_rename
         self._pending_rename = None
         self._exit_rename()
@@ -225,6 +274,15 @@ class RenameDelegate(NodeIndicatorDelegate):
     # ------------------------------------------------------------------
 
     def eventFilter(self, obj: object, event: QEvent) -> bool:
+        """Intercept Enter (commit) and Escape (cancel) on the inline editor.
+
+        Args:
+            obj: The object the event was sent to.
+            event: The event to filter.
+
+        Returns:
+            ``True`` if the event was consumed, otherwise defers to super.
+        """
         if not isinstance(event, QKeyEvent):
             return super().eventFilter(obj, event)
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
@@ -243,6 +301,13 @@ class RenameDelegate(NodeIndicatorDelegate):
     # ------------------------------------------------------------------
 
     def _try_commit(self) -> None:
+        """Validate the new name and perform the rename, or mark a conflict.
+
+        Performs a case-sensitive (Linux) or case-insensitive (Windows)
+        collision check.  On collision, beeps, sets RENAME_CONFLICT on the
+        conflicting node, and leaves the editor open.  On success, stores the
+        pending rename and closes the editor cleanly.
+        """
         editor = self._current_editor
         if editor is None or self._rename_index is None:
             return
@@ -403,6 +468,13 @@ class _ConflictDialog(QDialog):
         self.reject()
 
     def result_action(self) -> tuple[ConflictAction, bool]:
+        """Return the user's choice as ``(action, apply_to_all)``.
+
+        Returns:
+            A tuple of the chosen ``ConflictAction`` (``'overwrite'`` or
+            ``'skip'``) and a bool indicating whether it should apply to all
+            remaining conflicts in the current merge.
+        """
         return self._action, self._apply_to_all
 
 
@@ -411,6 +483,13 @@ class _ConflictDialog(QDialog):
 # ---------------------------------------------------------------------------
 
 def _error_dialog(parent: QWidget, title: str, message: str) -> None:
+    """Show a modal error dialog with an OK button.
+
+    Args:
+        parent: Parent widget for the dialog.
+        title: Window title string.
+        message: Human-readable error description shown in the dialog body.
+    """
     dlg = QDialog(parent)
     dlg.setWindowTitle(title)
     dlg.setSizeGripEnabled(True)
@@ -427,6 +506,16 @@ def _error_dialog(parent: QWidget, title: str, message: str) -> None:
 
 
 def _confirm_dialog(parent: QWidget, title: str, message: str) -> bool:
+    """Show a modal Yes/No confirmation dialog.
+
+    Args:
+        parent: Parent widget for the dialog.
+        title: Window title string.
+        message: Question or warning text shown in the dialog body.
+
+    Returns:
+        ``True`` if the user clicked Yes, ``False`` otherwise.
+    """
     dlg = QDialog(parent)
     dlg.setWindowTitle(title)
     dlg.setSizeGripEnabled(True)
@@ -498,6 +587,11 @@ class FileTreeView(QTreeView):
     # ------------------------------------------------------------------
 
     def set_cache(self, cache) -> None:
+        """Inject the hash cache reference used for path updates after file operations.
+
+        Args:
+            cache: The application's shared ``HashCache`` instance.
+        """
         self._cache = cache
 
     # ------------------------------------------------------------------
@@ -505,6 +599,7 @@ class FileTreeView(QTreeView):
     # ------------------------------------------------------------------
 
     def resizeEvent(self, event) -> None:
+        """Keep the ghost overlay sized to the viewport on resize."""
         super().resizeEvent(event)
         self._ghost_overlay.resize(self.viewport().size())
 
@@ -513,6 +608,11 @@ class FileTreeView(QTreeView):
     # ------------------------------------------------------------------
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
+        """Route keyboard events to rename, movement, delete, or navigation handlers.
+
+        Args:
+            event: The key event to process.
+        """
         key = event.key()
 
         if self._movement_mode:
@@ -557,6 +657,14 @@ class FileTreeView(QTreeView):
         super().keyPressEvent(event)
 
     def _handle_movement_key(self, key: int, event: QKeyEvent) -> None:
+        """Process keys while in keyboard movement mode.
+
+        Arrow keys move the ghost; Enter commits the move; Escape cancels.
+
+        Args:
+            key: The Qt key code.
+            event: The full key event (used for ``event.accept()`` calls).
+        """
         if key == Qt.Key.Key_Up:
             self._move_ghost_step(-1)
             event.accept()
@@ -582,6 +690,11 @@ class FileTreeView(QTreeView):
             super().keyPressEvent(event)
 
     def _handle_left(self, index: QModelIndex) -> None:
+        """Collapse the current directory, or move selection to its parent.
+
+        Args:
+            index: The currently selected model index.
+        """
         if not index.isValid():
             return
         node: FileNode = index.internalPointer()
@@ -593,6 +706,13 @@ class FileTreeView(QTreeView):
                 self.setCurrentIndex(parent)
 
     def _handle_right(self, index: QModelIndex) -> None:
+        """Expand the current directory, or move selection to its first child.
+
+        Beeps for symlinks and non-directory files.
+
+        Args:
+            index: The currently selected model index.
+        """
         if not index.isValid():
             return
         node: FileNode = index.internalPointer()
@@ -612,6 +732,11 @@ class FileTreeView(QTreeView):
             self._beep()
 
     def _handle_enter(self, index: QModelIndex) -> None:
+        """Toggle directory expansion, or emit ``file_selected`` for files.
+
+        Args:
+            index: The currently selected model index.
+        """
         if not index.isValid():
             return
         node: FileNode = index.internalPointer()
@@ -625,6 +750,7 @@ class FileTreeView(QTreeView):
 
     @staticmethod
     def _beep() -> None:
+        """Emit a system beep; silently ignored if the platform does not support it."""
         try:
             QApplication.beep()
         except Exception:
@@ -635,6 +761,11 @@ class FileTreeView(QTreeView):
     # ------------------------------------------------------------------
 
     def _show_context_menu(self, position) -> None:
+        """Build and show the right-click context menu for the item at *position*.
+
+        Args:
+            position: Cursor position in viewport coordinates.
+        """
         index = self.indexAt(position)
         if not index.isValid():
             return
@@ -661,6 +792,11 @@ class FileTreeView(QTreeView):
     # ------------------------------------------------------------------
 
     def _trigger_delete(self, index: QModelIndex) -> None:
+        """Confirm with the user and delete the item at *index* via ``delete_item``.
+
+        Args:
+            index: The model index of the item to delete.
+        """
         if not index.isValid():
             return
         node: FileNode = index.internalPointer()
@@ -695,6 +831,11 @@ class FileTreeView(QTreeView):
     # ------------------------------------------------------------------
 
     def _trigger_move_dialog(self, index: QModelIndex) -> None:
+        """Open a directory picker and move the item at *index* to the chosen destination.
+
+        Args:
+            index: The model index of the item to move.
+        """
         if not index.isValid():
             return
         node: FileNode = index.internalPointer()
@@ -729,6 +870,12 @@ class FileTreeView(QTreeView):
     # ------------------------------------------------------------------
 
     def _do_move(self, src: Path, dst_parent: Path) -> None:
+        """Execute ``move_item`` for *src* → *dst_parent* and handle any errors.
+
+        Args:
+            src: The source item path.
+            dst_parent: The destination directory path.
+        """
         result = move_item(
             src,
             dst_parent,
@@ -744,6 +891,14 @@ class FileTreeView(QTreeView):
             self._report_move_failures(result.failures)
 
     def _confirm_cross_fs(self, size_str: str) -> bool:
+        """Show a modal warning about a cross-filesystem copy-then-delete operation.
+
+        Args:
+            size_str: Human-readable size string for the data to be copied.
+
+        Returns:
+            ``True`` if the user confirmed, ``False`` to cancel.
+        """
         return _confirm_dialog(
             self,
             "Cross-Filesystem Move",
@@ -753,6 +908,15 @@ class FileTreeView(QTreeView):
         )
 
     def _confirm_merge(self, src_name: str, dst_path_str: str) -> bool:
+        """Show a modal warning that moving *src_name* will merge with an existing directory.
+
+        Args:
+            src_name: Name of the source directory being moved.
+            dst_path_str: Absolute path string of the existing destination directory.
+
+        Returns:
+            ``True`` if the user confirmed the merge, ``False`` to cancel.
+        """
         return _confirm_dialog(
             self,
             "Directory Merge",
@@ -762,11 +926,25 @@ class FileTreeView(QTreeView):
         )
 
     def _resolve_conflict(self, filename: str) -> tuple[ConflictAction, bool]:
+        """Show the per-file conflict dialog and return the user's choice.
+
+        Args:
+            filename: Name of the file that already exists at the destination.
+
+        Returns:
+            A ``(ConflictAction, apply_to_all)`` tuple.
+        """
         dlg = _ConflictDialog(filename, self)
         dlg.exec()
         return dlg.result_action()
 
     def _cache_update(self, old_path: str, new_path: str) -> None:
+        """Update the hash cache entry when a file is renamed or moved.
+
+        Args:
+            old_path: Absolute path string before the operation.
+            new_path: Absolute path string after the operation.
+        """
         if self._cache is not None:
             self._cache.update_path(old_path, new_path)
 
@@ -777,6 +955,12 @@ class FileTreeView(QTreeView):
         return result
 
     def _collect_expanded_recursive(self, parent: QModelIndex, result: list[str]) -> None:
+        """Recursively append expanded path strings under *parent* to *result*.
+
+        Args:
+            parent: The model index to iterate from; invalid means the root.
+            result: Accumulator list that receives expanded path strings.
+        """
         model = self.model()
         if model is None:
             return
@@ -799,6 +983,12 @@ class FileTreeView(QTreeView):
                 self.expand(idx)
 
     def _tree_refresh(self, old_path: Path, new_path: Path) -> None:
+        """Update hash tracking and refresh affected directories after a move.
+
+        Args:
+            old_path: Source path before the move.
+            new_path: Destination path after the move.
+        """
         model = self.model()
         if not isinstance(model, FileTreeModel):
             return
@@ -814,6 +1004,11 @@ class FileTreeView(QTreeView):
         self._restore_all_expanded(expanded)
 
     def _report_move_failures(self, failures: list[tuple[str, str]]) -> None:
+        """Show an error dialog summarising per-file failures from a directory merge.
+
+        Args:
+            failures: List of ``(path, reason)`` pairs from ``MoveResult.failures``.
+        """
         lines = "\n".join(f"  \u2022 {Path(p).name}: {msg}" for p, msg in failures)
         _error_dialog(
             self,
@@ -830,6 +1025,7 @@ class FileTreeView(QTreeView):
     # once the cursor moves beyond startDragDistance.
 
     def mousePressEvent(self, event) -> None:
+        """Record the drag start position and source path on a left-button press."""
         if event.button() == Qt.MouseButton.LeftButton and not self._movement_mode:
             idx = self.indexAt(event.position().toPoint())
             if idx.isValid():
@@ -842,11 +1038,13 @@ class FileTreeView(QTreeView):
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
+        """Clear drag state on mouse release."""
         self._drag_start_pos = None
         self._drag_source_path = None
         super().mouseReleaseEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
+        """Initiate a drag once the cursor moves beyond ``startDragDistance``."""
         if (
             event.buttons() & Qt.MouseButton.LeftButton
             and self._drag_start_pos is not None
@@ -863,6 +1061,14 @@ class FileTreeView(QTreeView):
         super().mouseMoveEvent(event)
 
     def _initiate_drag(self, src_path: Path) -> None:
+        """Create and execute a ``QDrag`` for *src_path*, showing the ghost overlay.
+
+        The ghost is shown before ``drag.exec()`` blocks so it is visible during
+        the entire drag.  It is always cleared in the ``finally`` block.
+
+        Args:
+            src_path: Absolute ``Path`` of the item being dragged.
+        """
         # Prepare the ghost overlay before exec() blocks the call.
         model = self.model()
         if isinstance(model, FileTreeModel):
@@ -890,12 +1096,14 @@ class FileTreeView(QTreeView):
             self._drag_ghost_height = 0
 
     def dragEnterEvent(self, event) -> None:
+        """Accept internal drags carrying the echofinder path MIME type."""
         if event.source() is self and event.mimeData().hasFormat(_DRAG_MIME_TYPE):
             event.acceptProposedAction()
         else:
             event.ignore()
 
     def dragMoveEvent(self, event) -> None:
+        """Keep the ghost overlay updated as the drag cursor moves over the tree."""
         if event.source() is self and event.mimeData().hasFormat(_DRAG_MIME_TYPE):
             event.acceptProposedAction()
             if self._drag_ghost_source_path is not None:
@@ -928,6 +1136,7 @@ class FileTreeView(QTreeView):
         self._ghost_overlay.show_ghost(ghost_rect, collision)
 
     def dropEvent(self, event) -> None:
+        """Execute the move for an internal drop operation."""
         self._ghost_overlay.clear_ghost()
         if event.source() is not self:
             event.ignore()
@@ -963,6 +1172,15 @@ class FileTreeView(QTreeView):
     # ------------------------------------------------------------------
 
     def _enter_movement_mode(self, index: QModelIndex) -> None:
+        """Enter keyboard movement mode for the item at *index*.
+
+        Hides the source row, initialises the ghost at the current position,
+        and sets ``_movement_mode`` so that subsequent key events are routed
+        to ``_handle_movement_key``.
+
+        Args:
+            index: The model index of the item to move.
+        """
         if not index.isValid():
             return
         node: FileNode = index.internalPointer()
@@ -1019,6 +1237,7 @@ class FileTreeView(QTreeView):
         return last
 
     def _cancel_movement(self) -> None:
+        """Exit movement mode without committing; restore the original selection."""
         self._movement_mode = False
         self._ghost_overlay.clear_ghost()
         self._rename_delegate.set_hidden_source(None)
@@ -1032,6 +1251,7 @@ class FileTreeView(QTreeView):
         self.viewport().update()
 
     def _commit_movement(self) -> None:
+        """Commit the ghost position as the move destination and execute the move."""
         if self._move_source_persistent is None or self._move_ghost_target is None:
             self._cancel_movement()
             return

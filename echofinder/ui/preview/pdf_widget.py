@@ -34,6 +34,11 @@ class _PageLabel(QLabel):
     """Sized placeholder for one rendered PDF page."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
+        """Create an initially unrendered page placeholder label.
+
+        Args:
+            parent: Optional Qt parent widget.
+        """
         super().__init__(parent)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setStyleSheet("background-color: white; border: 1px solid #d0d0d0;")
@@ -41,13 +46,24 @@ class _PageLabel(QLabel):
 
     @property
     def rendered(self) -> bool:
+        """``True`` if a pixmap has been set on this label.
+
+        Returns:
+            Whether this page has been rendered.
+        """
         return self._rendered
 
     def set_rendered(self, pixmap: QPixmap) -> None:
+        """Set *pixmap* on the label and mark the page as rendered.
+
+        Args:
+            pixmap: The rendered page pixmap.
+        """
         self.setPixmap(pixmap)
         self._rendered = True
 
     def clear_render(self) -> None:
+        """Clear the pixmap and mark the page as unrendered (used during zoom changes)."""
         self.clear()
         self._rendered = False
 
@@ -56,6 +72,11 @@ class PDFPreviewWidget(QWidget):
     """Renders PDF pages using PyMuPDF with zoom, scroll, and per-file session state."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
+        """Create the scroll area, page container, and deferred-render timer.
+
+        Args:
+            parent: Optional Qt parent widget.
+        """
         super().__init__(parent)
 
         layout = QVBoxLayout(self)
@@ -145,12 +166,18 @@ class PDFPreviewWidget(QWidget):
     # ------------------------------------------------------------------
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
+        """Rebuild page placeholders at the current zoom when the pane is resized."""
         super().resizeEvent(event)
         if self._doc is not None:
             zoom = self._zoom_state.get(self._current_path or "", 1.0)
             self._rebuild_placeholders_at_zoom(zoom)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
+        """Handle ``+``/``-`` zoom keys and ``Ctrl+0`` reset.
+
+        Args:
+            event: The key event to process.
+        """
         key = event.key()
         mods = event.modifiers()
         ctrl = Qt.KeyboardModifier.ControlModifier
@@ -184,12 +211,22 @@ class PDFPreviewWidget(QWidget):
     # ------------------------------------------------------------------
 
     def _zoom_by(self, factor: float) -> None:
+        """Multiply the current zoom by *factor*, clamped to [``_ZOOM_MIN``, ``_ZOOM_MAX``].
+
+        Args:
+            factor: Multiplicative zoom step (e.g. ``_ZOOM_STEP`` = 1.25 to zoom in).
+        """
         key = self._current_path or ""
         current = self._zoom_state.get(key, 1.0)
         new_zoom = max(_ZOOM_MIN, min(_ZOOM_MAX, current * factor))
         self._apply_zoom(new_zoom)
 
     def _apply_zoom(self, zoom: float) -> None:
+        """Persist *zoom* for the current path and rebuild page placeholders.
+
+        Args:
+            zoom: New zoom factor relative to fit-to-width (1.0 = fit exactly).
+        """
         if self._current_path is not None:
             self._zoom_state[self._current_path] = zoom
         if self._doc is not None:

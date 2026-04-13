@@ -46,7 +46,33 @@ _TEXT_EXT = {
 
 
 class FileTypeResolver:
+    """Classifies filesystem entries as ``FileType`` values.
+
+    Detection uses two strategies in priority order:
+
+    1. **MIME type** via ``python-magic`` (libmagic) — reliable for binary
+       formats such as images, video, audio, and PDF.
+    2. **File extension** fallback — used when libmagic is unavailable or
+       returns an ambiguous ``text/*`` or ``application/*`` MIME type.
+
+    A single instance is shared across the application lifetime; it is
+    stateless and safe to call from any thread.
+    """
+
     def resolve(self, path: Path, root: Path | None = None) -> FileType:
+        """Classify *path* as a ``FileType``.
+
+        Symlinks are classified first (before any ``is_dir`` / ``is_file``
+        checks) so that the symlink type is not obscured by the target type.
+
+        Args:
+            path: The filesystem path to classify.
+            root: The current tree root; required for
+                ``SYMLINK_INTERNAL`` vs ``SYMLINK_EXTERNAL`` discrimination.
+
+        Returns:
+            The ``FileType`` value for *path*.
+        """
         if path.is_symlink():
             return self._resolve_symlink(path, root)
         if path.is_dir():
@@ -68,6 +94,16 @@ class FileTypeResolver:
         return self._ext_to_type(path.suffix.lower())
 
     def _resolve_symlink(self, path: Path, root: Path | None) -> FileType:
+        """Determine whether a symlink target is inside or outside *root*.
+
+        Args:
+            path: The symlink path.
+            root: The current tree root used for internal/external comparison.
+
+        Returns:
+            ``SYMLINK_INTERNAL`` if the resolved target is under *root*,
+            otherwise ``SYMLINK_EXTERNAL``.
+        """
         try:
             raw_target = os.readlink(str(path))
             target = Path(raw_target)
@@ -81,6 +117,17 @@ class FileTypeResolver:
         return FileType.SYMLINK_EXTERNAL
 
     def _mime_to_type(self, mime: str) -> FileType:
+        """Map a MIME type string to a ``FileType``.
+
+        Text and code subtypes are not distinguished here; the caller
+        falls back to ``_ext_to_type`` for those cases.
+
+        Args:
+            mime: A MIME type string, e.g. ``'image/png'``.
+
+        Returns:
+            The matching ``FileType``, or ``UNKNOWN`` if not recognised.
+        """
         if mime.startswith("image/"):
             return FileType.IMAGE
         if mime.startswith("video/"):
@@ -93,6 +140,14 @@ class FileTypeResolver:
         return FileType.UNKNOWN
 
     def _ext_to_type(self, ext: str) -> FileType:
+        """Map a lowercase file extension (including the dot) to a ``FileType``.
+
+        Args:
+            ext: Lowercase extension string, e.g. ``'.py'``.
+
+        Returns:
+            The matching ``FileType``, or ``UNKNOWN`` if not in any known set.
+        """
         if ext in _IMAGE_EXT:
             return FileType.IMAGE
         if ext in _VIDEO_EXT:

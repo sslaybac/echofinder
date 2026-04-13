@@ -28,6 +28,11 @@ class ImagePreviewWidget(QWidget):
     """Renders an image scaled to fit the pane; supports per-file zoom retention."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
+        """Create the scroll area, image label, and install the wheel event filter.
+
+        Args:
+            parent: Optional Qt parent widget.
+        """
         super().__init__(parent)
 
         layout = QVBoxLayout(self)
@@ -85,10 +90,16 @@ class ImagePreviewWidget(QWidget):
     # ------------------------------------------------------------------
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
+        """Re-scale the image when the pane is resized."""
         super().resizeEvent(event)
         self._refresh()
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
+        """Handle ``+``/``-`` zoom keys and ``Ctrl+0`` reset.
+
+        Args:
+            event: The key event to process.
+        """
         key = event.key()
         mods = event.modifiers()
         ctrl = Qt.KeyboardModifier.ControlModifier
@@ -122,12 +133,22 @@ class ImagePreviewWidget(QWidget):
     # ------------------------------------------------------------------
 
     def _zoom_by(self, factor: float) -> None:
+        """Multiply the current zoom by *factor*, clamped to [``_ZOOM_MIN``, ``_ZOOM_MAX``].
+
+        Args:
+            factor: Multiplicative zoom step, e.g. ``_ZOOM_STEP`` (1.25) to zoom in.
+        """
         key = self._current_path or ""
         current = self._zoom_state.get(key, 1.0)
         new_zoom = max(_ZOOM_MIN, min(_ZOOM_MAX, current * factor))
         self._apply_zoom(new_zoom)
 
     def _apply_zoom(self, zoom: float) -> None:
+        """Save *zoom* for the current path and refresh the display.
+
+        Args:
+            zoom: New zoom factor relative to fit-to-pane (1.0 = fit exactly).
+        """
         if self._current_path is not None:
             self._zoom_state[self._current_path] = zoom
         self._refresh()

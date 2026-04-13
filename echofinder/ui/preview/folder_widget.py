@@ -27,6 +27,11 @@ class FolderContentsWidget(QWidget):
     navigate_to_path = pyqtSignal(object)  # emits a Path
 
     def __init__(self, parent: QWidget | None = None) -> None:
+        """Create the title, item count label, and scrollable child listing.
+
+        Args:
+            parent: Optional Qt parent widget.
+        """
         super().__init__(parent)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(12, 12, 12, 8)
@@ -92,6 +97,12 @@ class _ChildButton(QPushButton):
     navigate_to_path = pyqtSignal(object)  # emits a Path
 
     def __init__(self, name: str, path: Path) -> None:
+        """Create a flat button row for *name* that emits *navigate_to_path* on click.
+
+        Args:
+            name: Display label for the button (typically the file or folder name).
+            path: The ``Path`` emitted when the button is clicked.
+        """
         super().__init__(name)
         self._path = path
         self.setFlat(True)
@@ -106,4 +117,5 @@ class _ChildButton(QPushButton):
         self.clicked.connect(self._emit)
 
     def _emit(self) -> None:
+        """Emit ``navigate_to_path`` with this button's ``Path``."""
         self.navigate_to_path.emit(self._path)

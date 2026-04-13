@@ -57,6 +57,7 @@ class PreviewPane(QStackedWidget):
     encoding_detected = pyqtSignal(str)     # encoding name; consumed by Stage 5
 
     def __init__(self, parent=None) -> None:
+        """Create all child preview widgets and register them in the stack."""
         super().__init__(parent)
 
         self._resolver = FileTypeResolver()
@@ -139,6 +140,12 @@ class PreviewPane(QStackedWidget):
     # ------------------------------------------------------------------
 
     def _show_folder(self, node: FileNode, root: Path | None) -> None:
+        """Load folder contents from already-loaded children or by scanning.
+
+        Args:
+            node: The ``FOLDER`` node whose children should be listed.
+            root: Current tree root, forwarded to ``scan_directory``.
+        """
         # Use already-loaded children if available (avoids a redundant scan);
         # otherwise scan via the same function used by the tree model so that
         # sort order matches what is shown in the tree (spec §5).
@@ -150,6 +157,11 @@ class PreviewPane(QStackedWidget):
         self.setCurrentIndex(_IDX_FOLDER)
 
     def _show_image(self, node: FileNode) -> None:
+        """Load image bytes and display them; shows unreadable widget on error.
+
+        Args:
+            node: The ``IMAGE`` node to preview.
+        """
         self.encoding_detected.emit("")
         if node.permission == PermissionState.NOT_READABLE:
             self._unreadable.show_for(node.path, is_permission_error=True)
@@ -167,6 +179,14 @@ class PreviewPane(QStackedWidget):
             self.setCurrentIndex(_IDX_UNREADABLE)
 
     def _show_text(self, node: FileNode) -> None:
+        """Decode text with the encoding cascade and display it.
+
+        Emits ``encoding_detected`` with the detected encoding name so the
+        metadata panel can update its encoding row.
+
+        Args:
+            node: The ``TEXT`` or ``CODE`` node to preview.
+        """
         if node.permission == PermissionState.NOT_READABLE:
             self.encoding_detected.emit("")
             self._unreadable.show_for(node.path, is_permission_error=True)
@@ -187,6 +207,11 @@ class PreviewPane(QStackedWidget):
             self.setCurrentIndex(_IDX_UNREADABLE)
 
     def _show_pdf(self, node: FileNode) -> None:
+        """Hand the PDF path to the PDF widget; shows unreadable widget on error.
+
+        Args:
+            node: The ``PDF`` node to preview.
+        """
         self.encoding_detected.emit("")
         if node.permission == PermissionState.NOT_READABLE:
             self._unreadable.show_for(node.path, is_permission_error=True)

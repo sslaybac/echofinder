@@ -26,7 +26,15 @@ from echofinder.ui.tree_model import FileTreeModel
 
 
 class MainWindow(QMainWindow):
+    """Top-level application window.
+
+    Owns the toolbar, the main horizontal splitter (file tree | preview/metadata),
+    the hashing engine, the polling engine, and the session state.  All signal
+    wiring between the UI and the background services happens here.
+    """
+
     def __init__(self) -> None:
+        """Construct the window, engines, and UI; then restore the last session."""
         super().__init__()
         self.setWindowTitle("Echofinder")
         self.resize(1100, 700)
@@ -62,6 +70,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _build_ui(self) -> None:
+        """Construct the toolbar, splitters, tree view, preview pane, and metadata panel."""
         # --- Toolbar ---
         toolbar = QToolBar("Main Toolbar", self)
         toolbar.setMovable(False)
@@ -122,6 +131,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _connect_engine_signals(self) -> None:
+        """Wire hashing engine signals to their main-thread handler slots."""
         self._hashing_engine.hashing_started.connect(self._on_hashing_started)
         self._hashing_engine.progress_updated.connect(self._on_progress_updated)
         self._hashing_engine.hashing_complete.connect(self._on_hashing_complete)
@@ -133,6 +143,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _connect_polling_signals(self) -> None:
+        """Wire polling engine signals to their main-thread handler slots."""
         self._polling_engine.entries_removed.connect(self._on_entries_removed)
         self._polling_engine.entries_added.connect(self._on_entries_added)
         self._polling_engine.entries_changed.connect(self._on_entries_changed)
@@ -236,6 +247,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _restore_session(self) -> None:
+        """Restore the last root directory from session state, if it still exists."""
         root_str = self._session.get_root()
         if root_str:
             root = Path(root_str)
@@ -249,6 +261,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def select_root_folder(self) -> None:
+        """Open a directory picker dialog and set the chosen path as the new root."""
         folder = QFileDialog.getExistingDirectory(
             self,
             "Select Root Folder",
@@ -258,6 +271,17 @@ class MainWindow(QMainWindow):
             self._set_root(Path(folder), restore_expansion=False)
 
     def _set_root(self, path: Path, *, restore_expansion: bool) -> None:
+        """Switch to *path* as the new tree root.
+
+        Cancels any in-flight hashing and polling for the previous root,
+        builds a new ``FileTreeModel``, wires all signals, persists the new
+        root to session state, and starts background hashing and polling.
+
+        Args:
+            path: Absolute ``Path`` to the new root directory.
+            restore_expansion: When ``True``, re-expand folders saved in
+                session state; when ``False``, clear the expansion state.
+        """
         # Interrupt any in-progress polling cycle for the old root.
         # start_polling() at the end of this method will restart the cycle for
         # the new root.  We do NOT call stop() here because stop() terminates
@@ -331,6 +355,11 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_hashing_started(self, total: int) -> None:
+        """Add progress bar and label to the status bar when hashing begins.
+
+        Args:
+            total: Total number of files to process (0 means nothing to do).
+        """
         if total == 0:
             return
         self.statusBar().clearMessage()
@@ -343,6 +372,13 @@ class MainWindow(QMainWindow):
         self.statusBar().addWidget(self._progress_label)
 
     def _on_progress_updated(self, current: int, total: int, from_cache: int) -> None:
+        """Update the progress bar value and label text.
+
+        Args:
+            current: Number of files processed so far.
+            total: Total number of files.
+            from_cache: Number of files whose hash came from the cache.
+        """
         if self._progress_bar is not None:
             self._progress_bar.setValue(current)
         if self._progress_label is not None:
@@ -351,12 +387,15 @@ class MainWindow(QMainWindow):
             )
 
     def _on_hashing_complete(self) -> None:
+        """Remove progress widgets from the status bar when hashing finishes."""
         self._remove_progress_widgets()
 
     def _on_hashing_cancelled(self) -> None:
+        """Remove progress widgets from the status bar when hashing is cancelled."""
         self._remove_progress_widgets()
 
     def _remove_progress_widgets(self) -> None:
+        """Remove and delete the progress bar and label from the status bar."""
         if self._progress_bar is not None:
             self.statusBar().removeWidget(self._progress_bar)
             self._progress_bar.deleteLater()
@@ -371,6 +410,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _save_expansion_state(self) -> None:
+        """Collect expanded paths from the tree and persist them to session state."""
         if self._tree_model is None:
             return
         expanded: list[str] = []
@@ -378,6 +418,12 @@ class MainWindow(QMainWindow):
         self._session.set_expansion_state(expanded)
 
     def _collect_expanded(self, parent: QModelIndex, result: list[str]) -> None:
+        """Recursively append expanded folder path strings to *result*.
+
+        Args:
+            parent: Model index to iterate from; invalid means the root.
+            result: Accumulator list that receives expanded path strings.
+        """
         model = self._tree_model
         if model is None:
             return
@@ -389,6 +435,7 @@ class MainWindow(QMainWindow):
                 self._collect_expanded(index, result)
 
     def _restore_expansion_state(self) -> None:
+        """Expand tree nodes for paths saved in session state, shallowest-first."""
         if self._tree_model is None:
             return
         paths = self._session.get_expansion_state()
@@ -402,6 +449,12 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_selection_changed(self, current: QModelIndex, _previous: QModelIndex) -> None:
+        """Update the preview pane, metadata panel, and delete button on selection change.
+
+        Args:
+            current: The newly selected model index.
+            _previous: The previously selected index (unused).
+        """
         self._delete_action.setEnabled(current.isValid())
         if not current.isValid():
             self._preview_pane.show_empty()
@@ -432,11 +485,20 @@ class MainWindow(QMainWindow):
                 self._tree_model.set_active_file(None)
 
     def _on_toolbar_delete(self) -> None:
+        """Trigger a delete on the currently selected tree item from the toolbar."""
         idx = self._tree_view.currentIndex()
         if idx.isValid():
             self._tree_view._trigger_delete(idx)
 
     def _on_file_selected(self, path: Path) -> None:
+        """Handle the Enter-key ``file_selected`` signal from the tree view.
+
+        The preview pane is already updated via ``currentChanged``, so this
+        slot is intentionally a no-op.
+
+        Args:
+            path: The path of the selected file (unused here).
+        """
         # Enter key on a file — preview pane already updated via currentChanged
         pass
 
@@ -460,6 +522,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def closeEvent(self, event) -> None:
+        """Stop background threads and close the hash cache on application exit."""
         # Stop the polling engine first so no signals fire after shutdown.
         if self._polling_engine.isRunning():
             self._polling_engine.stop()

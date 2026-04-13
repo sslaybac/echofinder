@@ -36,6 +36,11 @@ class TextPreviewWidget(QWidget):
     """Displays text and code with optional Pygments syntax highlighting."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
+        """Create the read-only ``QTextEdit`` with a monospaced font.
+
+        Args:
+            parent: Optional Qt parent widget.
+        """
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -63,6 +68,15 @@ class TextPreviewWidget(QWidget):
     # ------------------------------------------------------------------
 
     def _render_highlighted(self, path: Path, text: str) -> None:
+        """Render *text* with Pygments syntax highlighting and set it as HTML.
+
+        Plain-text files (``TextLexer``) are rendered via ``setPlainText`` to
+        avoid unnecessary HTML overhead.
+
+        Args:
+            path: File path used for lexer detection.
+            text: Decoded file content to render.
+        """
         lexer = _detect_lexer(path, text)
         if isinstance(lexer, _TextLexer):
             # Plain text: no highlighting, just monospaced rendering

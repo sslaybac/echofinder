@@ -20,10 +20,30 @@ _CREATE_TABLE = """
 
 
 class HashCache:
+    """Thread-safe SQLite cache mapping file paths to their SHA-256 hashes.
+
+    Each row stores the path, file size, modification time, hash, MIME type,
+    and detected programming language.  Cache hits require an exact match on
+    all three of (path, size, mtime), so stale entries are automatically
+    skipped when a file changes.
+
+    All public methods acquire ``_lock`` so they are safe to call from any
+    thread (the hashing engine's pool threads and the main thread both use
+    this object concurrently).
+
+    Attributes:
+        _db_path: Filesystem path to the SQLite database file.
+        _was_reset: ``True`` if the database was corrupted and recreated on
+            startup; used to show a one-time warning to the user.
+        _lock: Mutex protecting all SQLite operations.
+        _conn: Active SQLite connection (``check_same_thread=False``).
+    """
+
     _APP_NAME = "echofinder"
     _DB_FILE = "cache.db"
 
     def __init__(self) -> None:
+        """Open (or create) the cache database in the user config directory."""
         db_dir = Path(user_config_dir(self._APP_NAME))
         db_dir.mkdir(parents=True, exist_ok=True)
         self._db_path = db_dir / self._DB_FILE
@@ -32,6 +52,14 @@ class HashCache:
         self._conn = self._open_connection()
 
     def _open_connection(self) -> sqlite3.Connection:
+        """Create the SQLite connection and ensure the schema exists.
+
+        If the database file is corrupt or unreadable, it is deleted and
+        recreated via ``_reset_db``.
+
+        Returns:
+            A ready-to-use ``sqlite3.Connection``.
+        """
         try:
             conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
             conn.execute("PRAGMA case_sensitive_like = ON")
@@ -49,6 +77,7 @@ class HashCache:
             return conn
 
     def _reset_db(self) -> None:
+        """Delete the on-disk database file and mark the cache as reset."""
         try:
             if self._db_path.exists():
                 self._db_path.unlink()
@@ -58,6 +87,11 @@ class HashCache:
 
     @property
     def was_reset(self) -> bool:
+        """``True`` if the database was corrupted and recreated on startup.
+
+        Returns:
+            Whether the cache was reset during ``__init__``.
+        """
         return self._was_reset
 
     def lookup(self, path: str, size: int, mtime: float) -> str | None:
@@ -185,6 +219,7 @@ class HashCache:
             pass
 
     def close(self) -> None:
+        """Close the database connection; called on application shutdown."""
         try:
             with self._lock:
                 self._conn.close()

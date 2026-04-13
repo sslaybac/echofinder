@@ -101,6 +101,18 @@ def icon_for_hash_state(state: HashState) -> QIcon | None:
 # ---------------------------------------------------------------------------
 
 def _load(name: str, *, color: str = _ICON_COLOR) -> QIcon:
+    """Load a Phosphor SVG icon by name, caching the result.
+
+    Args:
+        name: Filename stem of the SVG under ``resources/icons/``,
+            e.g. ``'folder'`` for ``folder.svg``.
+        color: CSS hex color string substituted for ``currentColor`` in the
+            SVG source.  Defaults to the standard dark-grey icon color.
+
+    Returns:
+        A ``QIcon`` backed by the rendered pixmap.  Returns a null ``QIcon``
+        if the file does not exist or rendering fails.
+    """
     cache_key = f"{name}:{color}"
     if cache_key in _cache:
         return _cache[cache_key]
@@ -128,6 +140,19 @@ def _render(
     size: int = _ICON_SIZE,
     color: str = _ICON_COLOR,
 ) -> QIcon:
+    """Render an SVG file to a ``QIcon`` at *size* × *size* pixels.
+
+    Substitutes *color* for ``currentColor`` in the SVG source so that all
+    Phosphor icon strokes adopt the application's icon color scheme.
+
+    Args:
+        path: Absolute ``Path`` to the ``.svg`` file.
+        size: Pixel size of the square output pixmap.
+        color: CSS hex color string for ``currentColor`` substitution.
+
+    Returns:
+        A ``QIcon`` wrapping the rendered pixmap.
+    """
     svg_text = path.read_text(encoding="utf-8")
     # Phosphor SVGs use currentColor; substitute our desired color
     svg_text = svg_text.replace("currentColor", color)

@@ -16,6 +16,11 @@ class UnreadableWidget(QWidget):
     """Displays a contextually appropriate message for unreadable files."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
+        """Create the heading and detail labels; content is set by ``show_for``.
+
+        Args:
+            parent: Optional Qt parent widget.
+        """
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)

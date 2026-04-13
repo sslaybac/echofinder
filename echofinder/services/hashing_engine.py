@@ -16,6 +16,17 @@ from echofinder.models.scanner import walk_files
 # ---------------------------------------------------------------------------
 
 def _compute_hash(path: str) -> str:
+    """Compute the SHA-256 hex digest of a file using 64 KB read chunks.
+
+    Args:
+        path: Absolute path string to the file to hash.
+
+    Returns:
+        Lowercase hex-encoded SHA-256 digest string.
+
+    Raises:
+        OSError: If the file cannot be opened or read.
+    """
     sha256 = hashlib.sha256()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(65536), b""):
@@ -24,6 +35,15 @@ def _compute_hash(path: str) -> str:
 
 
 def _detect_mime(path: str) -> str | None:
+    """Return the MIME type of *path* via libmagic, or ``None`` on failure.
+
+    Args:
+        path: Absolute path string to inspect.
+
+    Returns:
+        A MIME type string such as ``'image/png'``, or ``None`` if libmagic
+        is unavailable or raises an exception.
+    """
     try:
         import magic
         return magic.from_file(path, mime=True)
@@ -32,6 +52,15 @@ def _detect_mime(path: str) -> str | None:
 
 
 def _detect_language(path: str) -> str | None:
+    """Return the Pygments lexer name for *path* based on its filename, or ``None``.
+
+    Args:
+        path: Absolute path string used for filename-based lexer lookup.
+
+    Returns:
+        A human-readable language name such as ``'Python'``, or ``None`` if
+        no lexer matches or Pygments is unavailable.
+    """
     try:
         from pygments.lexers import get_lexer_for_filename
         from pygments.util import ClassNotFound
@@ -49,6 +78,13 @@ def _detect_language(path: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 class _HashTask(QRunnable):
+    """Per-file hashing task executed on the global Qt thread pool.
+
+    Checks the ``HashCache`` before computing a hash so that unmodified files
+    are returned instantly without re-reading from disk.  Results are delivered
+    asynchronously via the ``on_done`` callback.
+    """
+
     def __init__(
         self,
         path: str,
@@ -56,6 +92,18 @@ class _HashTask(QRunnable):
         on_done,        # callable(is_cache_hit, hash_val, filetype, language)
         is_cancelled,   # callable() -> bool
     ) -> None:
+        """Initialise the task.
+
+        Args:
+            path: Absolute path string of the file to hash.
+            cache: Shared ``HashCache`` instance for lookup and storage.
+            on_done: Callback invoked with
+                ``(is_cache_hit: bool, hash_val: str | None,
+                filetype: str | None, language: str | None)``
+                when the task completes (success or failure).
+            is_cancelled: Zero-argument callable returning ``True`` if the
+                owning ``HashingEngine`` has been cancelled.
+        """
         super().__init__()
         self.setAutoDelete(True)
         self._path = path
@@ -64,6 +112,13 @@ class _HashTask(QRunnable):
         self._is_cancelled = is_cancelled
 
     def run(self) -> None:
+        """Execute the hash task on a pool thread.
+
+        Checks cancellation first, then attempts a cache lookup.  On a cache
+        miss, computes the SHA-256 hash, detects MIME type and language, stores
+        the result in the cache, and invokes ``on_done``.  Any I/O error
+        results in ``on_done(False, None, None, None)``.
+        """
         if self._is_cancelled():
             self._on_done(False, None, None, None)
             return
@@ -117,6 +172,12 @@ class HashingEngine(QThread):
     file_hashed = pyqtSignal(str, str, str, str)   # path, hash, filetype, language
 
     def __init__(self, cache: HashCache, parent=None) -> None:
+        """Initialise the hashing engine without starting it.
+
+        Args:
+            cache: Shared ``HashCache`` used for lookup and persistence.
+            parent: Optional Qt parent object.
+        """
         super().__init__(parent)
         self._cache = cache
         self._root: Path | None = None
@@ -134,6 +195,14 @@ class HashingEngine(QThread):
         self._cancelled = True
 
     def run(self) -> None:
+        """QThread entry point: walk *root*, submit pool tasks, await completion.
+
+        Performs the directory walk on this background thread so the main
+        thread is never blocked.  Symlinks are pre-counted and advance the
+        progress counter without generating a hash.  Emits ``hashing_started``
+        once the total count is known, then ``hashing_complete`` or
+        ``hashing_cancelled`` when all tasks have finished.
+        """
         root = self._root
         if root is None:
             self.hashing_complete.emit()

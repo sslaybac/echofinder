@@ -24,6 +24,11 @@ class SymlinkWidget(QWidget):
     navigate_to_path = pyqtSignal(object)  # emits a Path
 
     def __init__(self, parent: QWidget | None = None) -> None:
+        """Create the name, kind, target, and optional jump-button labels.
+
+        Args:
+            parent: Optional Qt parent widget.
+        """
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -103,11 +108,21 @@ class SymlinkWidget(QWidget):
             self._outside_label.show()
 
     def _on_jump_clicked(self) -> None:
+        """Emit ``navigate_to_path`` with the resolved symlink target."""
         if self._jump_target is not None:
             self.navigate_to_path.emit(self._jump_target)
 
 
 def _is_within(path: Path, root: Path) -> bool:
+    """Return ``True`` if *path* is at or below *root* in the directory tree.
+
+    Args:
+        path: The path to test.
+        root: The root directory to test against (should already be resolved).
+
+    Returns:
+        ``True`` if *path* is relative to *root*.
+    """
     try:
         path.relative_to(root)
         return True

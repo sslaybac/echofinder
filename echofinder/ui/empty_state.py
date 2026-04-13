@@ -13,6 +13,7 @@ class EmptyStateWidget(QWidget):
     select_folder_requested = pyqtSignal()
 
     def __init__(self, parent=None) -> None:
+        """Build the welcome screen layout with a 'Select Root Folder' button."""
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
