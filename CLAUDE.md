@@ -18,7 +18,7 @@ logic in widgets.
 - `echofinder/ui/` — all PyQt6 widgets and UI components
 
 ## Implementation Status
-Eleven-stage plan. **Stages 1–9 are complete.** Stages 10–11 remain.
+Eleven-stage plan. **Stages 1–10 are complete.** Stage 11 remains.
 
 | Stage | Title                        | Status    |
 |-------|------------------------------|-----------|
@@ -31,7 +31,7 @@ Eleven-stage plan. **Stages 1–9 are complete.** Stages 10–11 remain.
 | 7     | Live Polling and Polish      | Complete  |
 | 8     | PDF Preview                  | Complete  |
 | 9     | Audio Playback               | Complete  |
-| 10    | Video Playback               | Remaining |
+| 10    | Video Playback               | Complete  |
 | 11    | EPUB Preview                 | Remaining |
 
 Stage 11 was added after the Staging Plan v2 was written; the staging plan does not
@@ -59,6 +59,36 @@ exists, which is not until `State.Playing` is reached. It must not be called in
 `load()` or immediately after `play()` (both crash with a null-pointer dereference
 in libvlc 3.x). Volume is applied by the poll timer on the first confirmed-playing
 tick via a `_volume_dirty` flag.
+
+## Stage 10: Video Playback — Implementation Notes
+`ui/preview/video_widget.py` — `VideoPreviewWidget` with play/pause toggle, stop,
+seek slider with elapsed/total time display, and volume slider. VLC's video output
+is embedded in a dedicated `QFrame` render surface within the widget.
+
+**VLC initialisation** — `vlc.Instance()` is created without `--no-video` or
+`--no-xlib` (video output and X11 access are both required for embedded rendering).
+`MediaPlayer` is created lazily on the first `load()` call. The `Media` object is
+stored as `self._media` for the lifetime of playback (same GC safety constraint as
+the audio widget).
+
+**Render surface** — `self._surface` is a `QFrame` with `WA_NativeWindow` set to
+guarantee a real native window handle. `WA_DontCreateNativeAncestors` prevents Qt
+from forcibly nativizing the entire widget ancestor chain.
+
+**Surface wiring** — `set_xwindow` (Linux) / `set_hwnd` (Windows) is called in
+`_on_play_pause` immediately before each `play()` call, at which point the stack has
+already switched to this widget and the surface is guaranteed to be visible.
+
+**Volume safety** — same `_volume_dirty` pattern as the audio widget.
+
+**Wayland decision (Decisions Log)** — Alma Linux 9 dev machine runs Wayland
+(`XDG_SESSION_TYPE=wayland`) with XWayland available (`DISPLAY=:0`). Qt's default
+platform on this machine is Wayland; VLC's `set_xwindow()` requires X11. Tested and
+confirmed: Echofinder must be launched under the Wayland platform (default) and VLC
+will use XWayland for video embedding via `DISPLAY=:0`. If X11 embedding does not
+produce video on a given Wayland setup, setting `QT_QPA_PLATFORM=xcb` forces Qt into
+X11 mode (requires `xcb-cursor` / `libxcb-cursor0` to be installed). On this machine
+that package is not present so only Wayland-platform launch is supported.
 
 ## Settled Design Decisions
 The following decisions were made deliberately after evaluating alternatives. Do not

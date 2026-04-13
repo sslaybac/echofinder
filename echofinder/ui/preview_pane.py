@@ -1,6 +1,6 @@
 """Preview pane — QStackedWidget that orchestrates all content widgets.
 
-Resolver precedence (Stage 4 spec §4, updated in Stage 9):
+Resolver precedence (Stage 4 spec §4, updated in Stage 10):
   1. Empty state  — no selection yet
   2. Symlink      — SYMLINK_INTERNAL / SYMLINK_EXTERNAL
   3. Folder       — FOLDER
@@ -8,7 +8,8 @@ Resolver precedence (Stage 4 spec §4, updated in Stage 9):
   5. Text / Code  — TEXT / CODE
   6. PDF          — PDF (Stage 8)
   7. Audio        — AUDIO (Stage 9)
-  8. Unsupported  — VIDEO, UNKNOWN (Stage 10 will add VIDEO)
+  8. Video        — VIDEO (Stage 10)
+  9. Unsupported  — UNKNOWN
 
 All filesystem I/O is performed through echofinder.services.preview; individual
 widgets receive pre-loaded data only.
@@ -29,6 +30,7 @@ from echofinder.ui.preview.folder_widget import FolderContentsWidget
 from echofinder.ui.preview.image_widget import ImagePreviewWidget
 from echofinder.ui.preview.audio_widget import AudioPreviewWidget
 from echofinder.ui.preview.pdf_widget import PDFPreviewWidget
+from echofinder.ui.preview.video_widget import VideoPreviewWidget
 from echofinder.ui.preview.symlink_widget import SymlinkWidget
 from echofinder.ui.preview.text_widget import TextPreviewWidget
 from echofinder.ui.preview.unreadable_widget import UnreadableWidget
@@ -44,6 +46,7 @@ _IDX_UNSUPPORTED = 5
 _IDX_UNREADABLE = 6
 _IDX_PDF = 7
 _IDX_AUDIO = 8
+_IDX_VIDEO = 9
 
 
 class PreviewPane(QStackedWidget):
@@ -74,6 +77,7 @@ class PreviewPane(QStackedWidget):
         self._unreadable = UnreadableWidget()
         self._pdf = PDFPreviewWidget()
         self._audio = AudioPreviewWidget()
+        self._video = VideoPreviewWidget()
 
         for widget in (
             self._empty,       # _IDX_EMPTY       = 0
@@ -85,6 +89,7 @@ class PreviewPane(QStackedWidget):
             self._unreadable,  # _IDX_UNREADABLE   = 6
             self._pdf,         # _IDX_PDF          = 7
             self._audio,       # _IDX_AUDIO        = 8
+            self._video,       # _IDX_VIDEO        = 9
         ):
             self.addWidget(widget)
 
@@ -104,6 +109,7 @@ class PreviewPane(QStackedWidget):
         self._image.release()
         self._pdf.release()
         self._audio.release()
+        self._video.release()
         self.encoding_detected.emit("")
         self.setCurrentIndex(_IDX_EMPTY)
 
@@ -118,6 +124,8 @@ class PreviewPane(QStackedWidget):
             self._pdf.release()
         if file_type != FileType.AUDIO:
             self._audio.release()
+        if file_type != FileType.VIDEO:
+            self._video.release()
 
         if file_type in (FileType.SYMLINK_INTERNAL, FileType.SYMLINK_EXTERNAL):
             self.encoding_detected.emit("")
@@ -140,8 +148,11 @@ class PreviewPane(QStackedWidget):
         elif file_type == FileType.AUDIO:
             self._show_audio(node)
 
+        elif file_type == FileType.VIDEO:
+            self._show_video(node)
+
         else:
-            # VIDEO, UNKNOWN → unsupported (Stage 10 will handle video)
+            # UNKNOWN → unsupported
             self.encoding_detected.emit("")
             self._unsupported.show_for(node.path, file_type)
             self.setCurrentIndex(_IDX_UNSUPPORTED)
@@ -244,3 +255,17 @@ class PreviewPane(QStackedWidget):
             return
         self._audio.load(node.path)
         self.setCurrentIndex(_IDX_AUDIO)
+
+    def _show_video(self, node: FileNode) -> None:
+        """Hand the video path to the video widget; shows unreadable widget on error.
+
+        Args:
+            node: The ``VIDEO`` node to preview.
+        """
+        self.encoding_detected.emit("")
+        if node.permission == PermissionState.NOT_READABLE:
+            self._unreadable.show_for(node.path, is_permission_error=True)
+            self.setCurrentIndex(_IDX_UNREADABLE)
+            return
+        self._video.load(node.path)
+        self.setCurrentIndex(_IDX_VIDEO)
