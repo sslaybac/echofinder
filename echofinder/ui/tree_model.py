@@ -306,8 +306,13 @@ class FileTreeModel(QAbstractItemModel):
 
     def flags(self, index: QModelIndex) -> Qt.ItemFlag:
         if not index.isValid():
-            return Qt.ItemFlag.NoItemFlags
-        return Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+            # Allow drops on the viewport background (between all items)
+            return Qt.ItemFlag.ItemIsDropEnabled
+        base = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsDragEnabled
+        node: FileNode = index.internalPointer()
+        if node.is_dir:
+            base |= Qt.ItemFlag.ItemIsDropEnabled
+        return base
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -359,6 +364,87 @@ class FileTreeModel(QAbstractItemModel):
         if node.parent is None or node is self._root:
             return QModelIndex()
         return self.createIndex(node.row, 0, node)
+
+    # ------------------------------------------------------------------
+    # Tree refresh after file operations (Stage 6)
+    # ------------------------------------------------------------------
+
+    def refresh_dir(self, dir_path: Path) -> None:
+        """Reload the children of *dir_path*, discarding stale nodes.
+
+        Called after deletion, rename, or move so the tree reflects the new
+        filesystem state.  If *dir_path* is not currently loaded this is a
+        no-op.
+        """
+        if self._root is None:
+            return
+
+        if dir_path == self._root.path:
+            parent_index = QModelIndex()
+            parent_node = self._root
+        else:
+            parent_index = self.index_for_path(dir_path)
+            if not parent_index.isValid():
+                return
+            parent_node = parent_index.internalPointer()
+
+        if not parent_node.children_loaded:
+            return
+
+        old_children = parent_node.children or []
+        old_count = len(old_children)
+
+        if old_count > 0:
+            self.beginRemoveRows(parent_index, 0, old_count - 1)
+            for child in old_children:
+                self._unregister_node_recursive(child)
+            parent_node.children = None
+            self.endRemoveRows()
+        else:
+            parent_node.children = None
+
+        if self.canFetchMore(parent_index):
+            self.fetchMore(parent_index)
+        else:
+            # Notify the view to update the expand indicator
+            if parent_index.isValid():
+                self.dataChanged.emit(parent_index, parent_index, [])
+
+    def notify_path_changed(self, old_path: str, new_path: str) -> None:
+        """Update in-memory hash tracking after a rename or move."""
+        # Update path→hash mapping
+        hash_val = self._path_to_hash.pop(old_path, None)
+        if hash_val is not None:
+            self._path_to_hash[new_path] = hash_val
+            group = self._hash_to_paths.get(hash_val)
+            if group is not None:
+                group.discard(old_path)
+                group.add(new_path)
+        # Update active-file tracking
+        if self._active_path == old_path:
+            self._active_path = new_path
+
+    def notify_path_removed(self, path: str) -> None:
+        """Remove a path from in-memory hash tracking after deletion."""
+        hash_val = self._path_to_hash.pop(path, None)
+        if hash_val is not None:
+            group = self._hash_to_paths.get(hash_val)
+            if group is not None:
+                group.discard(path)
+        if self._active_path == path:
+            self._active_path = None
+            self._active_hash = None
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _unregister_node_recursive(self, node: FileNode) -> None:
+        """Remove *node* and all its descendants from the path index."""
+        self._path_to_node.pop(str(node.path), None)
+        if node.children:
+            for child in node.children:
+                self._unregister_node_recursive(child)
 
     def _emit_slot4_changed(self, node: FileNode) -> None:
         """Emit dataChanged for slot 4 of *node* so the view repaints."""

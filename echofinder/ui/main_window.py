@@ -64,12 +64,20 @@ class MainWindow(QMainWindow):
         open_action = toolbar.addAction("Open Folder\u2026")
         open_action.triggered.connect(self.select_root_folder)
 
+        toolbar.addSeparator()
+        self._delete_action = toolbar.addAction("Delete")
+        self._delete_action.setEnabled(False)
+        self._delete_action.triggered.connect(self._on_toolbar_delete)
+
         # --- Central widget: horizontal splitter ---
         self._main_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.setCentralWidget(self._main_splitter)
 
         # Left pane: file tree
         self._tree_view = FileTreeView()
+        self._tree_view.set_cache(self._hash_cache)
+        self._tree_view.status_message.connect(lambda msg: self.statusBar().showMessage(msg))
+        self._tree_view.status_clear.connect(self.statusBar().clearMessage)
         self._main_splitter.addWidget(self._tree_view)
 
         # Right pane: vertical splitter (preview + metadata)
@@ -268,6 +276,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_selection_changed(self, current: QModelIndex, _previous: QModelIndex) -> None:
+        self._delete_action.setEnabled(current.isValid())
         if not current.isValid():
             self._preview_pane.show_empty()
             self._metadata_panel.clear()
@@ -295,6 +304,11 @@ class MainWindow(QMainWindow):
                 self._tree_model.set_active_file(str(node.path))
             else:
                 self._tree_model.set_active_file(None)
+
+    def _on_toolbar_delete(self) -> None:
+        idx = self._tree_view.currentIndex()
+        if idx.isValid():
+            self._tree_view._trigger_delete(idx)
 
     def _on_file_selected(self, path: Path) -> None:
         # Enter key on a file — preview pane already updated via currentChanged

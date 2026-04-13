@@ -1,21 +1,412 @@
+"""FileTreeView — QTreeView with file operations for Stage 6.
+
+New in Stage 6:
+  - RenameDelegate: extends NodeIndicatorDelegate to support inline editing
+    with collision detection, conflict-icon wiring, and status-bar messaging.
+    Also paints the movement-mode ghost-source row as invisible.
+  - _GhostOverlay: transparent child widget drawn on top of the viewport to
+    render the ghost and dashed outline during keyboard movement mode.
+  - FileTreeView: adds drag-and-drop, keyboard movement mode, rename mode,
+    deletion flow, and a fully wired context menu.
+"""
+
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
-from PyQt6.QtCore import QModelIndex, Qt, pyqtSignal
-from PyQt6.QtGui import QKeyEvent
-from PyQt6.QtWidgets import QApplication, QMenu, QTreeView
+from PyQt6.QtCore import (
+    QAbstractItemModel,
+    QEvent,
+    QModelIndex,
+    QPersistentModelIndex,
+    QRect,
+    Qt,
+    pyqtSignal,
+)
+from PyQt6.QtGui import (
+    QColor,
+    QKeyEvent,
+    QPainter,
+    QPen,
+)
+from PyQt6.QtWidgets import (
+    QAbstractItemDelegate,
+    QAbstractItemView,
+    QApplication,
+    QDialog,
+    QDialogButtonBox,
+    QFileDialog,
+    QLabel,
+    QLineEdit,
+    QMenu,
+    QMessageBox,
+    QSizePolicy,
+    QStyleOptionViewItem,
+    QTreeView,
+    QVBoxLayout,
+    QWidget,
+)
 
-from echofinder.models.file_node import FileNode
+from echofinder.models.file_node import FileNode, HashState
+from echofinder.services.file_operations import (
+    ConflictAction,
+    MoveResult,
+    check_name_collision,
+    delete_item,
+    move_item,
+    rename_item,
+)
 from echofinder.ui.node_delegate import NodeIndicatorDelegate
 from echofinder.ui.tree_model import FileTreeModel
 
 
-class FileTreeView(QTreeView):
-    """QTreeView with Echofinder keyboard navigation and context menu scaffold."""
+# ---------------------------------------------------------------------------
+# Ghost overlay widget
+# ---------------------------------------------------------------------------
 
-    file_selected = pyqtSignal(Path)    # emitted when a file node is activated
-    folder_selected = pyqtSignal(Path)  # emitted when a folder node is activated
+class _GhostOverlay(QWidget):
+    """Transparent overlay that draws the movement-mode ghost."""
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+        self.setAutoFillBackground(False)
+        self._rect: QRect | None = None
+        self._collision: bool = False
+        self.hide()
+
+    def show_ghost(self, rect: QRect, collision: bool = False) -> None:
+        self._rect = QRect(rect)
+        self._collision = collision
+        self.resize(self.parent().size())  # type: ignore[union-attr]
+        self.show()
+        self.raise_()
+        self.update()
+
+    def clear_ghost(self) -> None:
+        self._rect = None
+        self.hide()
+        self.update()
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        if self._rect is None:
+            return
+        painter = QPainter(self)
+        # Semi-transparent blue fill
+        painter.setOpacity(0.22)
+        painter.fillRect(self._rect, QColor(80, 120, 200))
+        painter.setOpacity(1.0)
+        # Dashed outline: red on collision, blue otherwise
+        color = QColor(200, 60, 60) if self._collision else QColor(60, 100, 200)
+        pen = QPen(color, 2, Qt.PenStyle.DashLine)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRect(self._rect.adjusted(1, 1, -2, -2))
+        painter.end()
+
+
+# ---------------------------------------------------------------------------
+# RenameDelegate
+# ---------------------------------------------------------------------------
+
+class RenameDelegate(NodeIndicatorDelegate):
+    """NodeIndicatorDelegate extended with inline editing support.
+
+    Also paints the movement-mode ghost-source row as invisible (the row is
+    kept in the model for correct navigation, but the delegate skips painting
+    it so the ghost overlay is the only visual representation).
+    """
+
+    def __init__(self, view: "FileTreeView", parent=None) -> None:
+        super().__init__(parent)
+        self._view = view
+        # State set during a rename session
+        self._conflict_node: FileNode | None = None
+        self._editing: bool = False
+        self._current_editor: QLineEdit | None = None
+        self._rename_index: QPersistentModelIndex | None = None
+        # Set during movement mode to suppress painting of the source row
+        self._hidden_persistent: QPersistentModelIndex | None = None
+
+    # ------------------------------------------------------------------
+    # Movement-mode row concealment
+    # ------------------------------------------------------------------
+
+    def set_hidden_source(self, index: QModelIndex | None) -> None:
+        self._hidden_persistent = (
+            QPersistentModelIndex(index) if (index is not None and index.isValid()) else None
+        )
+
+    # ------------------------------------------------------------------
+    # Painting — conceal the ghost-source row during movement mode
+    # ------------------------------------------------------------------
+
+    def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
+        if self._hidden_persistent is not None:
+            hidden = QModelIndex(self._hidden_persistent)
+            if hidden.isValid() and index == hidden:
+                return  # row is concealed; ghost overlay paints it instead
+        super().paint(painter, option, index)
+
+    # ------------------------------------------------------------------
+    # Editor lifecycle
+    # ------------------------------------------------------------------
+
+    @property
+    def is_editing(self) -> bool:
+        return self._editing
+
+    def createEditor(
+        self, parent: QWidget, option: QStyleOptionViewItem, index: QModelIndex
+    ) -> QWidget:
+        editor = QLineEdit(parent)
+        self._editing = True
+        self._current_editor = editor
+        self._rename_index = QPersistentModelIndex(index)
+        return editor
+
+    def setEditorData(self, editor: QWidget, index: QModelIndex) -> None:
+        node: FileNode = index.internalPointer()
+        le = editor  # type: ignore[assignment]
+        le.setText(node.name)
+        le.selectAll()
+
+    def setModelData(
+        self, editor: QWidget, model: QAbstractItemModel, index: QModelIndex
+    ) -> None:
+        # Handled entirely in eventFilter; this is intentionally a no-op.
+        pass
+
+    def destroyEditor(self, editor: QWidget, index: QModelIndex) -> None:
+        self._exit_rename()
+        super().destroyEditor(editor, index)
+
+    # ------------------------------------------------------------------
+    # Event filter — intercept Enter/Escape on the inline editor
+    # ------------------------------------------------------------------
+
+    def eventFilter(self, obj: object, event: QEvent) -> bool:
+        if not isinstance(event, QKeyEvent):
+            return super().eventFilter(obj, event)
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self._try_commit()
+            return True
+        if event.key() == Qt.Key.Key_Escape:
+            self._exit_rename()
+            editor = self._current_editor
+            if editor is not None:
+                self.closeEditor.emit(editor, QAbstractItemDelegate.EndEditHint.RevertModelData)
+            return True
+        return super().eventFilter(obj, event)
+
+    # ------------------------------------------------------------------
+    # Rename logic
+    # ------------------------------------------------------------------
+
+    def _try_commit(self) -> None:
+        editor = self._current_editor
+        if editor is None or self._rename_index is None:
+            return
+
+        new_name = editor.text().strip()
+        index = QModelIndex(self._rename_index)
+        if not index.isValid():
+            return
+
+        node: FileNode = index.internalPointer()
+        old_path: Path = node.path
+        parent_dir: Path = old_path.parent
+
+        if not new_name or new_name == old_path.name:
+            # Empty name or no change — treat as cancel
+            self._exit_rename()
+            self.closeEditor.emit(editor, QAbstractItemDelegate.EndEditHint.RevertModelData)
+            return
+
+        # Collision check (case-sensitive on Linux, case-insensitive on Windows)
+        try:
+            existing = set(e.name for e in parent_dir.iterdir())
+        except OSError:
+            existing = set()
+
+        on_windows = sys.platform == "win32"
+        if on_windows:
+            collision_names = {n.lower() for n in existing if n.lower() != old_path.name.lower()}
+            collision = new_name.lower() in collision_names
+        else:
+            collision_names = existing - {old_path.name}
+            collision = new_name in collision_names
+
+        if collision:
+            try:
+                QApplication.beep()
+            except Exception:
+                pass
+            # Mark the conflicting node with RENAME_CONFLICT (slot 4 warning icon)
+            self._mark_conflict(parent_dir, new_name, on_windows)
+            # Write a plain-language message to the status bar
+            self._view.status_message.emit(
+                f"A file named \u2018{new_name}\u2019 already exists in this folder."
+            )
+            # Do NOT close the editor; leave user in rename mode
+            return
+
+        # No collision: perform the rename via business logic layer
+        new_path = parent_dir / new_name
+        rename_result = rename_item(old_path, new_path)
+        if not rename_result.success:
+            _error_dialog(
+                self._view,
+                "Rename Failed",
+                rename_result.error_msg or f"Could not rename \u2018{old_path.name}\u2019.",
+            )
+            self._exit_rename()
+            self.closeEditor.emit(editor, QAbstractItemDelegate.EndEditHint.RevertModelData)
+            return
+
+        # Update cache and tree
+        model = self._view.model()
+        if isinstance(model, FileTreeModel):
+            model.notify_path_changed(str(old_path), str(new_path))
+            model.refresh_dir(parent_dir)
+        if self._view._cache is not None:
+            self._view._cache.update_path(str(old_path), str(new_path))
+
+        self._exit_rename()
+        self.closeEditor.emit(editor, QAbstractItemDelegate.EndEditHint.NoHint)
+
+    def _mark_conflict(self, parent_dir: Path, new_name: str, case_insensitive: bool) -> None:
+        """Find the conflicting node and set its slot-4 to RENAME_CONFLICT."""
+        model = self._view.model()
+        if not isinstance(model, FileTreeModel):
+            return
+        conflict_path = parent_dir / new_name
+        # Try to find an existing node for the conflict (case-insensitive if needed)
+        conflict_node: FileNode | None = None
+        if case_insensitive:
+            for path_str, node in model._path_to_node.items():
+                if node.path.parent == parent_dir and node.name.lower() == new_name.lower():
+                    conflict_node = node
+                    break
+        else:
+            conflict_node = model._path_to_node.get(str(conflict_path))
+        if conflict_node is not None and self._conflict_node is None:
+            self._conflict_node = conflict_node
+            model.set_rename_conflict(conflict_node)
+
+    def _exit_rename(self) -> None:
+        """Clean up rename-mode state: clear conflict icon, status bar."""
+        self._editing = False
+        self._current_editor = None
+        self._rename_index = None
+
+        # Clear conflict icon and restore prior slot-4 state
+        if self._conflict_node is not None:
+            model = self._view.model()
+            if isinstance(model, FileTreeModel):
+                model.clear_rename_conflict(self._conflict_node)
+            self._conflict_node = None
+
+        self._view.status_clear.emit()
+
+
+# ---------------------------------------------------------------------------
+# Per-file conflict dialog (merge)
+# ---------------------------------------------------------------------------
+
+class _ConflictDialog(QDialog):
+    """Ask overwrite / skip for a single filename collision during a merge."""
+
+    def __init__(self, filename: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("File Conflict")
+        self.setModal(True)
+        self._action: ConflictAction = "skip"
+        self._apply_to_all: bool = False
+
+        layout = QVBoxLayout(self)
+        label = QLabel(
+            f"A file named \u2018{filename}\u2019 already exists at the destination.\n"
+            "What would you like to do?"
+        )
+        label.setWordWrap(True)
+        layout.addWidget(label)
+
+        buttons = QDialogButtonBox()
+        overwrite_btn = buttons.addButton("Overwrite", QDialogButtonBox.ButtonRole.AcceptRole)
+        skip_btn = buttons.addButton("Skip", QDialogButtonBox.ButtonRole.RejectRole)
+        overwrite_all_btn = buttons.addButton(
+            "Overwrite All", QDialogButtonBox.ButtonRole.AcceptRole
+        )
+        skip_all_btn = buttons.addButton("Skip All", QDialogButtonBox.ButtonRole.RejectRole)
+        layout.addWidget(buttons)
+
+        overwrite_btn.clicked.connect(self._on_overwrite)
+        skip_btn.clicked.connect(self._on_skip)
+        overwrite_all_btn.clicked.connect(self._on_overwrite_all)
+        skip_all_btn.clicked.connect(self._on_skip_all)
+
+    def _on_overwrite(self) -> None:
+        self._action = "overwrite"
+        self._apply_to_all = False
+        self.accept()
+
+    def _on_skip(self) -> None:
+        self._action = "skip"
+        self._apply_to_all = False
+        self.reject()
+
+    def _on_overwrite_all(self) -> None:
+        self._action = "overwrite"
+        self._apply_to_all = True
+        self.accept()
+
+    def _on_skip_all(self) -> None:
+        self._action = "skip"
+        self._apply_to_all = True
+        self.reject()
+
+    def result_action(self) -> tuple[ConflictAction, bool]:
+        return self._action, self._apply_to_all
+
+
+# ---------------------------------------------------------------------------
+# Plain helper dialogs
+# ---------------------------------------------------------------------------
+
+def _error_dialog(parent: QWidget, title: str, message: str) -> None:
+    box = QMessageBox(parent)
+    box.setWindowTitle(title)
+    box.setIcon(QMessageBox.Icon.Warning)
+    box.setText(message)
+    box.exec()
+
+
+def _confirm_dialog(parent: QWidget, title: str, message: str) -> bool:
+    box = QMessageBox(parent)
+    box.setWindowTitle(title)
+    box.setIcon(QMessageBox.Icon.Question)
+    box.setText(message)
+    box.setStandardButtons(
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+    )
+    box.setDefaultButton(QMessageBox.StandardButton.No)
+    return box.exec() == QMessageBox.StandardButton.Yes
+
+
+# ---------------------------------------------------------------------------
+# FileTreeView
+# ---------------------------------------------------------------------------
+
+class FileTreeView(QTreeView):
+    """QTreeView with full Stage 6 file operations."""
+
+    file_selected = pyqtSignal(Path)
+    folder_selected = pyqtSignal(Path)
+    status_message = pyqtSignal(str)  # request to show a status bar message
+    status_clear = pyqtSignal()       # request to clear the status bar
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -23,17 +414,77 @@ class FileTreeView(QTreeView):
         self.setUniformRowHeights(True)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
-        # Install the four-slot indicator delegate
-        self._indicator_delegate = NodeIndicatorDelegate(self)
-        self.setItemDelegate(self._indicator_delegate)
+
+        # Rename delegate (replaces the plain NodeIndicatorDelegate)
+        self._rename_delegate = RenameDelegate(self, self)
+        self.setItemDelegate(self._rename_delegate)
+
+        # Hash cache reference (set by MainWindow after construction)
+        self._cache = None
+
+        # Drag-and-drop (internal only; cross-app DnD not supported)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDropIndicatorShown(True)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self._drag_source_persistent: QPersistentModelIndex | None = None
+
+        # Movement mode state
+        self._movement_mode: bool = False
+        self._move_source_persistent: QPersistentModelIndex | None = None
+        self._move_source_was_expanded: bool = False
+        self._move_ghost_target: QPersistentModelIndex | None = None
+        self._move_ghost_height: int = 0
+
+        # Ghost overlay
+        self._ghost_overlay = _GhostOverlay(self.viewport())
+        self._ghost_overlay.resize(self.viewport().size())
 
     # ------------------------------------------------------------------
-    # Keyboard navigation (US-015)
+    # Cache injection
+    # ------------------------------------------------------------------
+
+    def set_cache(self, cache) -> None:
+        self._cache = cache
+
+    # ------------------------------------------------------------------
+    # Viewport resize — keep ghost overlay sized correctly
+    # ------------------------------------------------------------------
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._ghost_overlay.resize(self.viewport().size())
+
+    # ------------------------------------------------------------------
+    # Keyboard navigation
     # ------------------------------------------------------------------
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
         key = event.key()
+
+        if self._movement_mode:
+            self._handle_movement_key(key, event)
+            return
+
         index = self.currentIndex()
+
+        if key == Qt.Key.Key_F2:
+            if not self._rename_delegate.is_editing and index.isValid():
+                self.edit(index)
+            event.accept()
+            return
+
+        if key in (Qt.Key.Key_M, Qt.Key.Key_F6):
+            if not self._rename_delegate.is_editing and index.isValid():
+                self._enter_movement_mode(index)
+            event.accept()
+            return
+
+        if key == Qt.Key.Key_Delete:
+            if not self._rename_delegate.is_editing and index.isValid():
+                self._trigger_delete(index)
+            event.accept()
+            return
 
         if key in (Qt.Key.Key_Left, Qt.Key.Key_Backspace):
             self._handle_left(index)
@@ -50,22 +501,32 @@ class FileTreeView(QTreeView):
             event.accept()
             return
 
-        if key == Qt.Key.Key_F2:
-            # Stage 6 stub: rename
-            event.accept()
-            return
-
-        if key in (Qt.Key.Key_M, Qt.Key.Key_F6):
-            # Stage 6 stub: move
-            event.accept()
-            return
-
-        if key == Qt.Key.Key_Delete:
-            # Stage 6 stub: delete
-            event.accept()
-            return
-
         super().keyPressEvent(event)
+
+    def _handle_movement_key(self, key: int, event: QKeyEvent) -> None:
+        if key == Qt.Key.Key_Up:
+            self._move_ghost_step(-1)
+            event.accept()
+        elif key == Qt.Key.Key_Down:
+            self._move_ghost_step(1)
+            event.accept()
+        elif key == Qt.Key.Key_Left:
+            self._move_ghost_left()
+            event.accept()
+        elif key == Qt.Key.Key_Right:
+            self._move_ghost_right()
+            event.accept()
+        elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self._commit_movement()
+            event.accept()
+        elif key == Qt.Key.Key_Escape:
+            self._cancel_movement()
+            event.accept()
+        elif key == Qt.Key.Key_F2:
+            event.accept()  # no-op during movement mode
+        else:
+            # Allow other keys (e.g. expand via Space) to pass through.
+            super().keyPressEvent(event)
 
     def _handle_left(self, index: QModelIndex) -> None:
         if not index.isValid():
@@ -82,24 +543,19 @@ class FileTreeView(QTreeView):
         if not index.isValid():
             return
         node: FileNode = index.internalPointer()
-
         if node.is_symlink:
             self._beep()
             return
-
         if node.is_dir:
             if not self.isExpanded(index):
                 self.expand(index)
             else:
-                model = self.model()
-                first_child = model.index(0, 0, index)
+                first_child = self.model().index(0, 0, index)
                 if first_child.isValid():
                     self.setCurrentIndex(first_child)
                 else:
-                    # Empty directory
                     self._beep()
         else:
-            # Plain file — non-drillable
             self._beep()
 
     def _handle_enter(self, index: QModelIndex) -> None:
@@ -122,7 +578,7 @@ class FileTreeView(QTreeView):
             pass
 
     # ------------------------------------------------------------------
-    # Context menu scaffold (Stage 6)
+    # Context menu
     # ------------------------------------------------------------------
 
     def _show_context_menu(self, position) -> None:
@@ -132,10 +588,447 @@ class FileTreeView(QTreeView):
 
         menu = QMenu(self)
         rename_action = menu.addAction("Rename")
-        rename_action.setEnabled(False)
-        move_action = menu.addAction("Move")
-        move_action.setEnabled(False)
+        rename_action.setEnabled(not self._movement_mode and not self._rename_delegate.is_editing)
+        rename_action.triggered.connect(lambda: self.edit(index))
+
+        move_action = menu.addAction("Move\u2026")
+        move_action.setEnabled(not self._movement_mode and not self._rename_delegate.is_editing)
+        move_action.triggered.connect(lambda: self._trigger_move_dialog(index))
+
+        menu.addSeparator()
+
         delete_action = menu.addAction("Delete")
-        delete_action.setEnabled(False)
+        delete_action.setEnabled(not self._movement_mode and not self._rename_delegate.is_editing)
+        delete_action.triggered.connect(lambda: self._trigger_delete(index))
 
         menu.exec(self.viewport().mapToGlobal(position))
+
+    # ------------------------------------------------------------------
+    # Deletion
+    # ------------------------------------------------------------------
+
+    def _trigger_delete(self, index: QModelIndex) -> None:
+        if not index.isValid():
+            return
+        node: FileNode = index.internalPointer()
+        name = node.name
+        if not _confirm_dialog(
+            self,
+            "Confirm Delete",
+            f"Send \u2018{name}\u2019 to the trash?\n\nThis action can be undone from the trash.",
+        ):
+            return
+
+        result = delete_item(node.path)
+        if not result.success:
+            _error_dialog(self, "Delete Failed", result.error_msg or "Could not delete the item.")
+            return
+
+        # Update model
+        model = self.model()
+        if isinstance(model, FileTreeModel):
+            model.notify_path_removed(str(node.path))
+            model.refresh_dir(node.path.parent)
+
+        if self._cache is not None:
+            # Remove from cache: update_path to nowhere is not meaningful;
+            # the cache row will simply become stale — acceptable for Stage 6.
+            pass
+
+    # ------------------------------------------------------------------
+    # Move dialog
+    # ------------------------------------------------------------------
+
+    def _trigger_move_dialog(self, index: QModelIndex) -> None:
+        if not index.isValid():
+            return
+        node: FileNode = index.internalPointer()
+        model = self.model()
+        root_path: Path | None = model.root_path() if isinstance(model, FileTreeModel) else None
+
+        start_dir = str(root_path) if root_path else str(node.path.parent)
+        dst_str = QFileDialog.getExistingDirectory(
+            self, f"Move \u2018{node.name}\u2019 to\u2026", start_dir
+        )
+        if not dst_str:
+            return
+
+        dst_parent = Path(dst_str)
+
+        # Enforce: destination must be inside the root
+        if root_path is not None:
+            try:
+                dst_parent.relative_to(root_path)
+            except ValueError:
+                _error_dialog(
+                    self,
+                    "Invalid Destination",
+                    "The destination must be inside the current root folder.",
+                )
+                return
+
+        self._do_move(node.path, dst_parent)
+
+    # ------------------------------------------------------------------
+    # Shared move execution (called by keyboard mode, DnD, and dialog)
+    # ------------------------------------------------------------------
+
+    def _do_move(self, src: Path, dst_parent: Path) -> None:
+        result = move_item(
+            src,
+            dst_parent,
+            confirm_cross_fs=self._confirm_cross_fs,
+            confirm_merge=self._confirm_merge,
+            resolve_conflict=self._resolve_conflict,
+            cache_update=self._cache_update,
+            tree_refresh=self._tree_refresh,
+        )
+        if not result.success and result.error_msg:
+            _error_dialog(self, "Move Failed", result.error_msg)
+        if result.failures:
+            self._report_move_failures(result.failures)
+
+    def _confirm_cross_fs(self, size_str: str) -> bool:
+        return _confirm_dialog(
+            self,
+            "Cross-Filesystem Move",
+            f"The source and destination are on different filesystems.\n\n"
+            f"This will copy all data (up to {size_str}) and then delete the originals "
+            f"— it is not a simple relink.\n\nContinue?",
+        )
+
+    def _confirm_merge(self, src_name: str, dst_path_str: str) -> bool:
+        return _confirm_dialog(
+            self,
+            "Directory Merge",
+            f"A folder named \u2018{src_name}\u2019 already exists at the destination.\n\n"
+            f"Moving will merge the two folders. Any conflicting files will be handled "
+            f"individually.\n\nContinue?",
+        )
+
+    def _resolve_conflict(self, filename: str) -> tuple[ConflictAction, bool]:
+        dlg = _ConflictDialog(filename, self)
+        dlg.exec()
+        return dlg.result_action()
+
+    def _cache_update(self, old_path: str, new_path: str) -> None:
+        if self._cache is not None:
+            self._cache.update_path(old_path, new_path)
+
+    def _tree_refresh(self, old_path: Path, new_path: Path) -> None:
+        model = self.model()
+        if not isinstance(model, FileTreeModel):
+            return
+        model.notify_path_changed(str(old_path), str(new_path))
+        # Always refresh the old parent (item removed from there)
+        model.refresh_dir(old_path.parent)
+        # Refresh the new parent if different
+        if new_path.parent != old_path.parent:
+            model.refresh_dir(new_path.parent)
+        # For directory merges, refresh the destination directory itself
+        if new_path.is_dir():
+            model.refresh_dir(new_path)
+
+    def _report_move_failures(self, failures: list[tuple[str, str]]) -> None:
+        lines = "\n".join(f"  \u2022 {Path(p).name}: {msg}" for p, msg in failures)
+        _error_dialog(
+            self,
+            "Move Completed with Errors",
+            f"The following files could not be moved:\n\n{lines}",
+        )
+
+    # ------------------------------------------------------------------
+    # Drag-and-drop
+    # ------------------------------------------------------------------
+
+    def startDrag(self, supportedActions) -> None:
+        idx = self.currentIndex()
+        self._drag_source_persistent = QPersistentModelIndex(idx) if idx.isValid() else None
+        super().startDrag(supportedActions)
+
+    def dragEnterEvent(self, event) -> None:
+        if event.source() is self:
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:
+        if event.source() is self:
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event) -> None:
+        if event.source() is not self:
+            event.ignore()
+            return
+        event.accept()
+
+        # Destination
+        pos = event.position().toPoint()
+        dst_index = self.indexAt(pos)
+
+        if not dst_index.isValid():
+            # Dropped on empty space — land in root
+            model = self.model()
+            dst_parent: Path | None = model.root_path() if isinstance(model, FileTreeModel) else None
+        else:
+            dst_node: FileNode = dst_index.internalPointer()
+            if dst_node.is_dir:
+                dst_parent = dst_node.path
+            else:
+                dst_parent = dst_node.path.parent
+
+        # Source
+        src_index = (
+            QModelIndex(self._drag_source_persistent)
+            if self._drag_source_persistent
+            else QModelIndex()
+        )
+        if not src_index.isValid():
+            return
+        src_node: FileNode = src_index.internalPointer()
+
+        if dst_parent is None:
+            return
+
+        # Don't move onto self
+        if dst_parent == src_node.path.parent and dst_parent == src_node.path:
+            return
+
+        self._do_move(src_node.path, dst_parent)
+
+    # ------------------------------------------------------------------
+    # Keyboard movement mode
+    # ------------------------------------------------------------------
+
+    def _enter_movement_mode(self, index: QModelIndex) -> None:
+        if not index.isValid():
+            return
+        node: FileNode = index.internalPointer()
+        self._movement_mode = True
+        self._move_source_persistent = QPersistentModelIndex(index)
+        self._move_source_was_expanded = node.is_dir and self.isExpanded(index)
+        # Lock expand state for the source: prevent expand/collapse of the moving item.
+        # Other directories remain interactive.
+        self._move_ghost_target = QPersistentModelIndex(index)
+
+        # Calculate ghost height (source group bounding rect)
+        self._move_ghost_height = self._compute_ghost_height(index)
+
+        # Conceal the source row in the delegate
+        self._rename_delegate.set_hidden_source(index)
+        self.viewport().update()
+
+        # Show ghost at current position
+        self._update_ghost()
+
+    def _compute_ghost_height(self, index: QModelIndex) -> int:
+        """Height in pixels of the source item's visible group."""
+        row_rect = self.visualRect(index)
+        if row_rect.isNull():
+            return 22  # fallback row height
+        node: FileNode = index.internalPointer()
+        if not (node.is_dir and self.isExpanded(index)):
+            return row_rect.height()
+
+        # Expanded directory: measure from top of dir row to bottom of last visible descendant
+        bottom = row_rect.bottom()
+        last_row = self._last_visible_descendant(index)
+        if last_row.isValid():
+            last_rect = self.visualRect(last_row)
+            if not last_rect.isNull():
+                bottom = last_rect.bottom()
+        return max(row_rect.height(), bottom - row_rect.top())
+
+    def _last_visible_descendant(self, index: QModelIndex) -> QModelIndex:
+        """Return the deepest last visible descendant of *index*."""
+        model = self.model()
+        last = QModelIndex()
+        row_count = model.rowCount(index)
+        if row_count == 0:
+            return last
+        last_child = model.index(row_count - 1, 0, index)
+        if not last_child.isValid():
+            return last
+        last = last_child
+        if self.isExpanded(last_child):
+            deeper = self._last_visible_descendant(last_child)
+            if deeper.isValid():
+                last = deeper
+        return last
+
+    def _cancel_movement(self) -> None:
+        self._movement_mode = False
+        self._ghost_overlay.clear_ghost()
+        self._rename_delegate.set_hidden_source(None)
+        # Restore selection to the original item
+        if self._move_source_persistent is not None:
+            src_idx = QModelIndex(self._move_source_persistent)
+            if src_idx.isValid():
+                self.setCurrentIndex(src_idx)
+        self._move_source_persistent = None
+        self._move_ghost_target = None
+        self.viewport().update()
+
+    def _commit_movement(self) -> None:
+        if self._move_source_persistent is None or self._move_ghost_target is None:
+            self._cancel_movement()
+            return
+
+        src_idx = QModelIndex(self._move_source_persistent)
+        target_idx = QModelIndex(self._move_ghost_target)
+        if not src_idx.isValid() or not target_idx.isValid():
+            self._cancel_movement()
+            return
+
+        src_node: FileNode = src_idx.internalPointer()
+        dst_parent = self._ghost_destination_parent()
+        if dst_parent is None:
+            self._cancel_movement()
+            return
+
+        # Exit movement mode first (restores tree display)
+        self._movement_mode = False
+        self._ghost_overlay.clear_ghost()
+        self._rename_delegate.set_hidden_source(None)
+        self._move_source_persistent = None
+        self._move_ghost_target = None
+        self.viewport().update()
+
+        # Same location? no-op
+        if dst_parent == src_node.path.parent:
+            return
+
+        self._do_move(src_node.path, dst_parent)
+
+    def _move_ghost_step(self, direction: int) -> None:
+        """Move ghost up (direction=-1) or down (+1)."""
+        if self._move_ghost_target is None:
+            return
+        target = QModelIndex(self._move_ghost_target)
+        if not target.isValid():
+            return
+
+        hidden = (
+            QModelIndex(self._move_source_persistent)
+            if self._move_source_persistent
+            else QModelIndex()
+        )
+
+        # Iterate to skip the hidden source row
+        current = target
+        for _ in range(self.model().rowCount() + 100):
+            if direction > 0:
+                nxt = self.indexBelow(current)
+            else:
+                nxt = self.indexAbove(current)
+            if not nxt.isValid():
+                break
+            if hidden.isValid() and nxt == hidden:
+                current = nxt  # skip and keep searching
+                continue
+            self._move_ghost_target = QPersistentModelIndex(nxt)
+            break
+
+        self._update_ghost()
+
+    def _move_ghost_left(self) -> None:
+        """Move ghost to the parent of its current target."""
+        if self._move_ghost_target is None:
+            return
+        target = QModelIndex(self._move_ghost_target)
+        if not target.isValid():
+            return
+        parent = target.parent()
+        if parent.isValid():
+            self._move_ghost_target = QPersistentModelIndex(parent)
+            self._update_ghost()
+
+    def _move_ghost_right(self) -> None:
+        """If current target is an expanded dir, move ghost inside it (first child)."""
+        if self._move_ghost_target is None:
+            return
+        target = QModelIndex(self._move_ghost_target)
+        if not target.isValid():
+            return
+        node: FileNode = target.internalPointer()
+        if node.is_dir and self.isExpanded(target):
+            # Ghost is now "positioned over" this expanded dir (as first child)
+            # The destination parent IS this directory; we stay on the dir index.
+            pass  # ghost target remains the dir; it IS the destination
+        self._update_ghost()
+
+    def _ghost_destination_parent(self) -> Path | None:
+        """Compute the destination parent directory from the ghost position."""
+        if self._move_ghost_target is None:
+            return None
+        target = QModelIndex(self._move_ghost_target)
+        if not target.isValid():
+            return None
+        node: FileNode = target.internalPointer()
+        # Ghost is "over" an expanded directory → move INTO that dir
+        if node.is_dir and self.isExpanded(target):
+            return node.path
+        # Otherwise move INTO the target's parent dir
+        parent = target.parent()
+        if parent.isValid():
+            parent_node: FileNode = parent.internalPointer()
+            return parent_node.path
+        # Ghost is at root level
+        model = self.model()
+        if isinstance(model, FileTreeModel):
+            return model.root_path()
+        return None
+
+    def _check_ghost_collision(self) -> bool:
+        """Return True when the ghost's current position would cause a directory merge."""
+        if self._move_source_persistent is None or self._move_ghost_target is None:
+            return False
+        src_idx = QModelIndex(self._move_source_persistent)
+        if not src_idx.isValid():
+            return False
+        src_node: FileNode = src_idx.internalPointer()
+        if not src_node.is_dir:
+            return False  # only dirs can cause merges
+        dst_parent = self._ghost_destination_parent()
+        if dst_parent is None:
+            return False
+        return check_name_collision(dst_parent, src_node.name)
+
+    def _update_ghost(self) -> None:
+        """Recalculate ghost rect from the current target and refresh the overlay."""
+        if self._move_ghost_target is None:
+            self._ghost_overlay.clear_ghost()
+            return
+        target = QModelIndex(self._move_ghost_target)
+        if not target.isValid():
+            self._ghost_overlay.clear_ghost()
+            return
+
+        row_rect = self.visualRect(target)
+        if row_rect.isNull():
+            self._ghost_overlay.clear_ghost()
+            return
+
+        node: FileNode = target.internalPointer()
+        if node.is_dir and self.isExpanded(target):
+            # Ghost appears as first child of this directory:
+            # draw the ghost just below the directory row.
+            ghost_top = row_rect.bottom()
+            ghost_rect = QRect(
+                row_rect.left(),
+                ghost_top,
+                row_rect.width(),
+                self._move_ghost_height,
+            )
+        else:
+            ghost_rect = QRect(
+                row_rect.left(),
+                row_rect.top(),
+                row_rect.width(),
+                self._move_ghost_height,
+            )
+
+        collision = self._check_ghost_collision()
+        self._ghost_overlay.show_ghost(ghost_rect, collision)
