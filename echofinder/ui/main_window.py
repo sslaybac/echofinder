@@ -145,17 +145,32 @@ class MainWindow(QMainWindow):
         """Remove paths from the tree and hash cache after polling detects deletion."""
         if self._tree_model is None:
             return
+        # Snapshot selection and expansion before refresh_dir removes rows.
+        # refresh_dir does beginRemoveRows/endRemoveRows which clears the Qt
+        # selection if the selected item is in the refreshed directory, and
+        # collapses everything when the refreshed directory is the root.
+        selected_path = self._selected_path()
+        expanded = self._tree_view._collect_all_expanded()
+
         self._tree_model.on_entries_removed(paths)
         # Prune deleted paths from the persistent hash cache.
         for path_str in paths:
             self._hash_cache.remove_path(path_str)
-        # Refresh polling snapshot since the tree has changed.
+
+        self._tree_view._restore_all_expanded(expanded)
+        self._restore_selected_path(selected_path, skip_paths=set(paths))
         self._refresh_polling_snapshot()
 
     def _on_entries_added(self, paths: list) -> None:
         """Refresh affected directories and queue new files for hashing."""
         if self._tree_model is None:
             return
+        # Snapshot selection and expansion before refresh_dir removes rows.
+        # Same issue as _on_entries_removed: rows are removed and re-inserted,
+        # which clears Qt's selection and expansion tracking for that subtree.
+        selected_path = self._selected_path()
+        expanded = self._tree_view._collect_all_expanded()
+
         # Refresh every parent directory that is currently loaded so the new
         # entries appear in the tree.  refresh_dir() is a no-op for unloaded
         # parents; those entries will appear naturally when the user expands.
@@ -171,6 +186,9 @@ class MainWindow(QMainWindow):
                 pass
         for parent in parents:
             self._tree_model.refresh_dir(parent)
+
+        self._tree_view._restore_all_expanded(expanded)
+        self._restore_selected_path(selected_path)
         if new_files:
             self._hashing_engine.rehash_paths(new_files)
         self._refresh_polling_snapshot()
@@ -181,6 +199,30 @@ class MainWindow(QMainWindow):
             return
         self._tree_model.on_entries_changed(paths)
         self._hashing_engine.rehash_paths(list(paths))
+
+    def _selected_path(self) -> Path | None:
+        """Return the path of the currently selected tree item, or None."""
+        idx = self._tree_view.currentIndex()
+        if idx.isValid():
+            node = idx.internalPointer()
+            return node.path
+        return None
+
+    def _restore_selected_path(
+        self, path: Path | None, skip_paths: set[str] | None = None
+    ) -> None:
+        """Re-select *path* in the tree after a refresh, if it still exists.
+
+        *skip_paths* is an optional set of path strings to treat as gone
+        (used after deletions so we do not try to re-select a removed item).
+        """
+        if path is None or self._tree_model is None:
+            return
+        if skip_paths and str(path) in skip_paths:
+            return
+        idx = self._tree_model.index_for_path(path)
+        if idx.isValid():
+            self._tree_view.setCurrentIndex(idx)
 
     def _refresh_polling_snapshot(self) -> None:
         """Push the current loaded-path snapshot to the polling engine."""
