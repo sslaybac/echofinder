@@ -13,7 +13,7 @@
 ## Setup
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/sslaybac/echofinder.git
 cd echofinder
 uv sync
 ```

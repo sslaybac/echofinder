@@ -99,7 +99,7 @@ installed separately from [videolan.org](https://www.videolan.org/).
 ### Clone and install
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/sslaybac/echofinder.git
 cd echofinder
 uv sync
 ```
