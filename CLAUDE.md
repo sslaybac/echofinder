@@ -62,49 +62,37 @@ tick via a `_volume_dirty` flag.
 
 ## Stage 10: Video Playback — Implementation Notes
 `ui/preview/video_widget.py` — `VideoPreviewWidget` with play/pause toggle, stop,
-seek slider with elapsed/total time display, and volume slider. VLC's video output
-is embedded in a dedicated `QFrame` render surface within the widget.
+seek slider with elapsed/total time display, and volume slider.
 
-**VLC initialisation** — `vlc.Instance()` is created without `--no-video` or
-`--no-xlib` (video output and X11 access are both required for embedded rendering).
-`MediaPlayer` is created lazily on the first `load()` call. The `Media` object is
-stored as `self._media` for the lifetime of playback (same GC safety constraint as
-the audio widget).
+**Technology** — Uses `QMediaPlayer` + `QVideoWidget` + `QAudioOutput` from
+`PyQt6.QtMultimedia` / `PyQt6.QtMultimediaWidgets` (included in PyQt6; no additional
+package). Qt routes video through its own backend (FFmpeg 7.x on this machine) without
+native window handle injection. `QVideoWidget` renders in-pane on both X11 and Wayland
+sessions without any platform-specific wiring.
 
-**Render surface** — `self._surface` is a `QFrame`. `WA_NativeWindow` and
-`WA_DontCreateNativeAncestors` are applied lazily in `_attach_surface()`, not in
-`__init__`. Setting them at construction forces Qt to create an X11 sub-window
-immediately; on Wayland (even via XWayland) the compositor decorates this sub-window
-with its own title bar, produces edge flickering, and causes event-loop deadlocks —
-all before any video file is ever selected.
+**Why not python-vlc** — VLC 3.x has no stable API for Wayland surface embedding.
+`set_xwindow()` requires a genuine X11 window ID; Qt in Wayland mode provides a
+Wayland surface handle that VLC rejects ("bad X11 window"), after which VLC falls back
+to its own top-level OS window. Attempted workarounds (lazy `WA_NativeWindow`,
+`--no-xlib`, platform detection + skip-embedding) all preserved the external-window
+behaviour. Qt Multimedia resolves this completely because it composes video through
+Qt's own render loop. python-vlc is retained for audio (Stage 9) where it works
+correctly.
 
-**Surface wiring and platform detection** — `_attach_surface()` is called in
-`_on_play_pause` immediately before each `play()` call. It checks
-`QGuiApplication.platformName()` at that point to determine the active platform:
-- **X11 (`xcb`)**: applies `WA_NativeWindow`, calls `set_xwindow(winId())`.
-- **Windows**: calls `set_hwnd(winId())`.
-- **Wayland**: skips window embedding entirely; shows an informational label in
-  `_surface` instead.
+**Signal-based updates** — `QMediaPlayer.positionChanged` updates the seek slider and
+time label; no poll timer is needed. `QMediaPlayer.durationChanged` updates the total
+time display. `QMediaPlayer.playbackStateChanged` drives the play/pause button label.
+`QMediaPlayer.errorOccurred` surfaces errors in the status label.
 
-**Volume safety** — same `_volume_dirty` pattern as the audio widget.
+**Seek feedback guard** — `_on_position_changed` checks `QSlider.isSliderDown()`
+before updating the slider, preventing the position signal from snapping the slider
+back while the user is dragging.
 
-**Poll timer terminal states** — `_poll_playback` handles `State.Stopped` and
-`State.Error` in addition to `State.Ended`. On Wayland, when the user closes VLC's
-external window, VLC transitions to `State.Stopped` (not `State.Ended`); handling
-only `State.Ended` left the Play button stuck showing "Pause" indefinitely.
+**Volume** — `QAudioOutput.setVolume()` takes a float in `[0.0, 1.0]`; the slider's
+integer `[0, 100]` range is divided by 100.
 
-**Wayland decision (Decisions Log)** — Alma Linux 9 dev machine runs Wayland
-(`XDG_SESSION_TYPE=wayland`). Qt's default platform is `wayland`; VLC's
-`set_xwindow()` requires a valid X11 window ID, but `winId()` in Wayland mode
-returns a Wayland surface handle. VLC rejects it ("bad X11 window"), falls back to
-its own top-level window, and the compositor treats that as a separate application
-window. Confirmed by libvlc's own diagnostic: "Pass `--no-xlib` to libvlc_new() to
-fix this." Fix: detect Wayland via `platformName()`, initialise VLC with `--no-xlib`,
-skip `set_xwindow`. VLC plays in its own window; all playback controls remain
-functional via the python-vlc API. `xcb-cursor` / `libxcb-cursor0` (required for
-`QT_QPA_PLATFORM=xcb`) is not installed on this machine, so forcing X11 mode is not
-available. Video embedding will work correctly on Windows and on Linux machines where
-Qt runs in X11 (`xcb`) mode.
+**Playback reset** — `release()` calls `player.stop()` then `player.setSource(QUrl())`
+to clear the media reference before the preview pane switches widgets.
 
 ## Settled Design Decisions
 The following decisions were made deliberately after evaluating alternatives. Do not

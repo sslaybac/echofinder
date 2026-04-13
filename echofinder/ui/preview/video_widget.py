@@ -1,50 +1,38 @@
 """Video playback widget (US-039, US-041 video portion).
 
-Uses python-vlc for playback. No video data is held in the Python process;
-VLC manages its own memory. Playback resets when ``load()`` is called with a
-new path (standard previewer behavior).
+Uses Qt Multimedia (``QMediaPlayer`` + ``QVideoWidget``) for in-pane video
+playback. Qt renders video through its own pipeline (FFmpeg backend on Linux,
+Media Foundation / DirectShow on Windows), so no platform-specific window
+handle wiring is required and Wayland sessions are fully supported.
+
+python-vlc was evaluated first. VLC 3.x has no stable API for Wayland surface
+embedding: ``set_xwindow()`` requires a genuine X11 window ID, but Qt in
+Wayland mode provides a Wayland surface handle that VLC rejects. Qt Multimedia
+does not have this limitation — it composes video through Qt's own render loop.
 
 Controls: play/pause toggle, stop, seek slider, volume slider.
 
-Platform behaviour
-------------------
-**X11 (Qt platform = xcb) and Windows**
-    VLC's video output is embedded directly in the preview pane. The render
-    surface is a ``QFrame`` (``self._surface``) whose native window handle is
-    passed to the VLC media player via ``set_xwindow`` (Linux/X11) or
-    ``set_hwnd`` (Windows) immediately before each ``play()`` call.
-    ``WA_NativeWindow`` is applied lazily at that point — never at construction
-    time — to avoid creating an X11 sub-window while the widget is dormant in
-    the preview stack.
+Volume notes
+------------
+``QAudioOutput.setVolume()`` accepts a float in ``[0.0, 1.0]``. The volume
+slider operates in the integer range ``[0, 100]``; division by 100 converts
+between the two.
 
-**Wayland (Qt platform = wayland)**
-    VLC's ``set_xwindow()`` requires a genuine X11 window ID.  When Qt runs in
-    Wayland mode, ``winId()`` returns a Wayland surface handle, not an X11 ID;
-    VLC rejects it with "bad X11 window" and falls back to creating its own
-    top-level window, which the compositor decorates as an independent window.
-    The fix: detect Wayland via ``QGuiApplication.platformName()`` and skip
-    ``set_xwindow`` entirely.  VLC is initialised with ``--no-xlib`` (VLC's own
-    recommendation when X11 threading is not set up), avoiding the
-    "Xlib not initialized for threads" error.  Video plays in VLC's own window;
-    all playback controls (play/pause, stop, seek, volume) remain functional
-    via the python-vlc API.  An informational label is shown in the preview
-    surface area to explain the external-window behaviour.
-
-Volume safety
--------------
-``audio_set_volume()`` is only safe once ``State.Playing`` is reached. Volume
-is applied by the poll timer on the first confirmed-playing tick via a
-``_volume_dirty`` flag (same pattern as the audio widget).
+Seek notes
+----------
+Position is tracked via ``QMediaPlayer.positionChanged`` (milliseconds).
+The seek slider range is ``[0, 1000]`` (same convention as the audio widget).
+``QSlider.isSliderDown()`` guards against a feedback loop when the poll
+update and the user drag occur simultaneously.
 """
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QGuiApplication
+from PyQt6.QtCore import Qt, QUrl
+from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
+from PyQt6.QtMultimediaWidgets import QVideoWidget
 from PyQt6.QtWidgets import (
-    QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -54,15 +42,9 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-try:
-    import vlc as _vlc
-
-    _VLC_AVAILABLE = True
-except Exception:
-    _VLC_AVAILABLE = False
-
-# How often to update the seek slider while playing (ms)
-_POLL_INTERVAL_MS = 500
+# How often Qt Multimedia signals position changes while playing (driven by
+# QMediaPlayer.positionChanged — no poll timer needed).
+_SEEK_SLIDER_RANGE = 1000
 
 
 def _fmt_ms(ms: int) -> str:
@@ -71,83 +53,48 @@ def _fmt_ms(ms: int) -> str:
     return f"{s // 60}:{s % 60:02d}"
 
 
-def _wayland_mode() -> bool:
-    """Return True when Qt is running on the Wayland platform.
-
-    Checked at play-time rather than at import time so that
-    ``QGuiApplication`` is guaranteed to exist.
-    """
-    return QGuiApplication.platformName() == "wayland"
-
-
 class VideoPreviewWidget(QWidget):
-    """Plays video files using python-vlc.
+    """Plays video files using Qt Multimedia with in-pane video rendering.
 
-    On X11 and Windows, VLC's video output is embedded inside the preview
-    pane.  On Wayland, VLC creates its own window (embedding is not possible
-    because Qt's Wayland surfaces do not carry valid X11 window IDs); all
-    playback controls remain functional.
+    ``QVideoWidget`` is used as the render surface.  Qt routes video through
+    its own backend (FFmpeg on Linux, Media Foundation on Windows) without
+    requiring native window handle injection, so the widget works correctly
+    on both X11 and Wayland sessions.
 
-    VLC instance and media player are created lazily on the first ``load()``
-    call.  No video data is held in the Python process; VLC manages its own
-    memory.
-
-    If python-vlc or libvlc is unavailable at import time, the widget renders
-    in a disabled state and does not crash.
+    Playback state is tracked via Qt signals; no poll timer is needed.
+    Playback resets when ``load()`` is called with a new path.
     """
 
     def __init__(self, parent: QWidget | None = None) -> None:
-        """Build the layout; VLC instance is created lazily on first load.
+        """Build the widget; ``QMediaPlayer`` is created immediately.
 
         Args:
             parent: Optional Qt parent widget.
         """
         super().__init__(parent)
 
-        self._instance: object | None = None   # vlc.Instance
-        self._player: object | None = None     # vlc.MediaPlayer
-        self._media: object | None = None      # vlc.Media — kept alive to prevent GC crash
-        self._current_path: Path | None = None
         self._duration_ms: int = 0
-        self._updating_seek = False            # guard: suppress slider feedback loop
-        self._volume_dirty = True              # sync volume on next confirmed Playing state
+
+        # Qt Multimedia objects
+        self._player = QMediaPlayer(self)
+        self._audio_out = QAudioOutput(self)
+        self._audio_out.setVolume(1.0)
+        self._player.setAudioOutput(self._audio_out)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # Video render surface.
-        # On X11/Windows: VLC draws directly into this widget's native window.
-        # On Wayland: VLC uses its own window; this area shows an info label.
-        #
-        # WA_NativeWindow is NOT set here. Setting it at construction time
-        # forces Qt to create a native X11 sub-window immediately; on Wayland
-        # (even via XWayland) the compositor decorates it with a title bar,
-        # produces edge flickering, and deadlocks the event loop — before any
-        # video file is selected. The attribute is applied lazily inside
-        # _attach_surface(), only when embedding is actually needed.
-        self._surface = QFrame()
-        self._surface.setStyleSheet("background-color: black;")
-        self._surface.setSizePolicy(
+        # QVideoWidget renders video in-pane on all Qt-supported platforms,
+        # including Wayland, without any native window handle wiring.
+        self._video_widget = QVideoWidget()
+        self._video_widget.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
+        self._player.setVideoOutput(self._video_widget)
+        layout.addWidget(self._video_widget, stretch=1)
 
-        # Informational overlay shown in Wayland mode while video is playing.
-        # Hidden by default; shown by _attach_surface() on Wayland.
-        surface_layout = QVBoxLayout(self._surface)
-        self._surface_label = QLabel(
-            "Video is playing in a separate VLC window.\n"
-            "(Wayland session — in-pane embedding is not available.)"
-        )
-        self._surface_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._surface_label.setStyleSheet("color: #888888;")
-        self._surface_label.setWordWrap(True)
-        self._surface_label.hide()
-        surface_layout.addWidget(self._surface_label)
-
-        layout.addWidget(self._surface, stretch=1)
-
-        # Controls area beneath the video surface
+        # Controls area
         controls = QWidget()
         ctl = QVBoxLayout(controls)
         ctl.setContentsMargins(12, 8, 12, 8)
@@ -168,7 +115,7 @@ class VideoPreviewWidget(QWidget):
         self._duration_label.setMinimumWidth(40)
 
         self._seek_slider = QSlider(Qt.Orientation.Horizontal)
-        self._seek_slider.setRange(0, 1000)
+        self._seek_slider.setRange(0, _SEEK_SLIDER_RANGE)
         self._seek_slider.setValue(0)
         self._seek_slider.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
@@ -221,15 +168,12 @@ class VideoPreviewWidget(QWidget):
 
         layout.addWidget(controls)
 
-        # Poll timer — updates seek slider and time label while playing
-        self._timer = QTimer(self)
-        self._timer.setInterval(_POLL_INTERVAL_MS)
-        self._timer.timeout.connect(self._poll_playback)
-
-        if not _VLC_AVAILABLE:
-            self._status_label.setText("python-vlc is not available.")
-            self._play_btn.setEnabled(False)
-            self._stop_btn.setEnabled(False)
+        # Wire Qt Multimedia signals
+        self._player.playbackStateChanged.connect(self._on_playback_state_changed)
+        self._player.positionChanged.connect(self._on_position_changed)
+        self._player.durationChanged.connect(self._on_duration_changed)
+        self._player.mediaStatusChanged.connect(self._on_media_status_changed)
+        self._player.errorOccurred.connect(self._on_error_occurred)
 
     # ------------------------------------------------------------------
     # Public API
@@ -238,246 +182,131 @@ class VideoPreviewWidget(QWidget):
     def load(self, path: Path) -> None:
         """Stop any current playback and prepare *path* for playback.
 
-        Creates the VLC instance on the first call. On Wayland, the instance
-        is created with ``--no-xlib`` (as recommended by libvlc when Xlib
-        thread-safety has not been initialised by the host process). On X11
-        and Windows, no extra flags are needed.
-
-        The render surface handle is wired up in ``_on_play_pause`` right
-        before each ``play()`` call, guaranteeing the widget is visible.
+        Resets the seek slider, time display, and play button. The player
+        begins buffering immediately; the user must press Play to start
+        playback.
 
         Args:
             path: Absolute path to the video file to load.
         """
-        self._stop_playback()
-        self._surface_label.hide()
-        self._current_path = path
-        self._status_label.setText("")
+        self._player.stop()
+        self._duration_ms = 0
         self._seek_slider.setValue(0)
         self._time_label.setText("0:00")
-        self._duration_ms = 0
         self._duration_label.setText("0:00")
         self._play_btn.setText("Play")
-        self._volume_dirty = True
+        self._status_label.setText("")
 
-        if not _VLC_AVAILABLE:
-            return
-
-        try:
-            if self._instance is None:
-                if sys.platform.startswith("linux") and _wayland_mode():
-                    # Wayland: no X11 embedding; --no-xlib prevents the
-                    # "Xlib not initialized for threads" error that libvlc
-                    # emits when the process has not called XInitThreads().
-                    self._instance = _vlc.Instance("--no-xlib")  # type: ignore[union-attr]
-                else:
-                    # X11 or Windows: Xlib access needed for set_xwindow.
-                    self._instance = _vlc.Instance()  # type: ignore[union-attr]
-
-            if self._player is None:
-                self._player = self._instance.media_player_new()  # type: ignore[union-attr]
-
-            # Keep a reference to the Media object for the lifetime of playback.
-            # VLC's C layer holds a raw pointer; if Python GC collects it the
-            # pointer becomes dangling and the process crashes immediately.
-            self._media = self._instance.media_new(str(path))  # type: ignore[union-attr]
-            self._player.set_media(self._media)  # type: ignore[union-attr]
-        except Exception as exc:
-            self._status_label.setText(f"Could not load file: {exc}")
-            self._play_btn.setEnabled(False)
-            return
-
-        self._play_btn.setEnabled(True)
-        self._stop_btn.setEnabled(True)
+        self._player.setSource(QUrl.fromLocalFile(str(path)))
 
     def release(self) -> None:
-        """Stop playback and release the current media without destroying VLC.
+        """Stop playback and clear the media source.
 
-        Clears all UI fields, hides the Wayland info label, and drops the
-        Python reference to the ``Media`` object. The VLC instance and player
-        are retained for reuse on the next ``load()`` call.
+        Called when the user navigates to a different file or the preview
+        pane is cleared.  Drops the media reference and resets all UI fields.
         """
-        self._stop_playback()
-        self._surface_label.hide()
-        self._media = None
-        self._current_path = None
-        self._status_label.setText("")
+        self._player.stop()
+        self._player.setSource(QUrl())   # clear source
+        self._duration_ms = 0
         self._seek_slider.setValue(0)
         self._time_label.setText("0:00")
         self._duration_label.setText("0:00")
         self._play_btn.setText("Play")
+        self._status_label.setText("")
 
     # ------------------------------------------------------------------
     # Slot handlers
     # ------------------------------------------------------------------
 
     def _on_play_pause(self) -> None:
-        """Toggle between play and pause.
-
-        Calls ``_attach_surface()`` immediately before each ``play()`` so that
-        the render surface handle is current and the widget is visible.
-        """
-        if self._player is None:
-            return
-        try:
-            state = self._player.get_state()  # type: ignore[union-attr]
-            if state == _vlc.State.Playing:  # type: ignore[union-attr]
-                self._player.pause()  # type: ignore[union-attr]
-                self._play_btn.setText("Play")
-                self._timer.stop()
-            else:
-                self._attach_surface()
-                self._player.play()  # type: ignore[union-attr]
-                # Do NOT call audio_set_volume() here: the audio output is
-                # created lazily by VLC on the first play() call. Volume is
-                # applied by the poll timer once State.Playing is confirmed.
-                self._play_btn.setText("Pause")
-                self._timer.start()
-        except Exception as exc:
-            self._status_label.setText(f"Playback error: {exc}")
+        """Toggle between play and pause."""
+        state = self._player.playbackState()
+        if state == QMediaPlayer.PlaybackState.PlayingState:
+            self._player.pause()
+        else:
+            self._player.play()
 
     def _on_stop(self) -> None:
-        """Stop playback and reset the seek slider."""
-        self._stop_playback()
-        self._surface_label.hide()
-        self._seek_slider.setValue(0)
-        self._time_label.setText("0:00")
+        """Stop playback and reset position to the beginning."""
+        self._player.stop()
 
     def _on_seek_moved(self, value: int) -> None:
         """Seek to the slider position when the user drags it.
 
-        Connected to ``QSlider.sliderMoved`` (not ``valueChanged``) to avoid
-        triggering seeks from programmatic poll-timer updates.
+        Connected to ``QSlider.sliderMoved`` (not ``valueChanged``) so that
+        programmatic updates from ``_on_position_changed`` do not trigger a
+        seek.
 
         Args:
             value: Slider position in the range ``[0, 1000]``.
         """
-        if self._player is None:
-            return
-        self._updating_seek = True
-        try:
-            self._player.set_position(value / 1000.0)  # type: ignore[union-attr]
-        except Exception:
-            pass
-        finally:
-            self._updating_seek = False
+        if self._duration_ms > 0:
+            target_ms = int(value / _SEEK_SLIDER_RANGE * self._duration_ms)
+            self._player.setPosition(target_ms)
 
     def _on_volume_changed(self, value: int) -> None:
-        """Apply the new volume level, or defer it if not yet playing.
+        """Apply the new volume level from the slider.
 
         Args:
             value: New volume level in the range ``[0, 100]``.
         """
-        if self._player is not None:
-            try:
-                state = self._player.get_state()  # type: ignore[union-attr]
-                if state == _vlc.State.Playing:  # type: ignore[union-attr]
-                    self._player.audio_set_volume(value)  # type: ignore[union-attr]
-                else:
-                    self._volume_dirty = True
-            except Exception:
-                pass
+        self._audio_out.setVolume(value / 100.0)
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    def _attach_surface(self) -> None:
-        """Wire the render surface to VLC, or show the Wayland info label.
-
-        Called immediately before each ``play()`` invocation. The preview
-        stack has already switched to this widget, so ``self._surface`` is
-        visible.
-
-        - **X11**: Applies ``WA_NativeWindow`` (lazily, to avoid creating an
-          X11 sub-window while the widget is dormant), then passes
-          ``winId()`` to ``set_xwindow()``.
-        - **Windows**: Passes ``winId()`` to ``set_hwnd()``.
-        - **Wayland**: Skips window-handle embedding entirely — Qt's Wayland
-          surface handles are not valid X11 window IDs. VLC creates its own
-          window. The info label is shown in the surface area to explain the
-          behaviour.
-        """
-        if self._player is None:
-            return
-
-        if sys.platform == "win32":
-            self._player.set_hwnd(int(self._surface.winId()))  # type: ignore[union-attr]
-        elif sys.platform.startswith("linux") and not _wayland_mode():
-            # X11 mode: apply WA_NativeWindow here (not at construction) so
-            # no native sub-window is created while the widget is inactive.
-            self._surface.setAttribute(Qt.WidgetAttribute.WA_NativeWindow)
-            self._surface.setAttribute(Qt.WidgetAttribute.WA_DontCreateNativeAncestors)
-            self._player.set_xwindow(int(self._surface.winId()))  # type: ignore[union-attr]
+    def _on_playback_state_changed(
+        self, state: QMediaPlayer.PlaybackState
+    ) -> None:
+        """Update the play/pause button label to match playback state."""
+        if state == QMediaPlayer.PlaybackState.PlayingState:
+            self._play_btn.setText("Pause")
         else:
-            # Wayland (or unrecognised platform): cannot embed.
-            # VLC will open its own window; show the info label so the user
-            # knows where to find the video.
-            self._surface_label.show()
+            self._play_btn.setText("Play")
 
-    def _stop_playback(self) -> None:
-        """Stop the VLC player and halt the poll timer.
+    def _on_position_changed(self, position_ms: int) -> None:
+        """Update the seek slider and elapsed time label.
 
-        Safe to call before ``load()`` has been called (player is ``None``).
+        Skips the update while the user is dragging the slider to prevent
+        the position signal from snapping the slider back mid-drag.
+
+        Args:
+            position_ms: Current playback position in milliseconds.
         """
-        self._timer.stop()
-        if self._player is not None:
-            try:
-                self._player.stop()  # type: ignore[union-attr]
-            except Exception:
-                pass
-        self._play_btn.setText("Play")
-
-    def _poll_playback(self) -> None:
-        """Update the seek slider and time label; stop the timer when playback ends.
-
-        Called every ``_POLL_INTERVAL_MS`` ms. On the first ``State.Playing``
-        tick, applies any pending volume change before updating position.
-
-        Handles ``State.Stopped`` in addition to ``State.Ended`` so that
-        closing VLC's external window (Wayland mode) is detected and the UI
-        resets correctly without waiting for user interaction.
-        """
-        if self._player is None:
+        if self._seek_slider.isSliderDown():
             return
-        try:
-            state = self._player.get_state()  # type: ignore[union-attr]
+        self._time_label.setText(_fmt_ms(position_ms))
+        if self._duration_ms > 0:
+            self._seek_slider.setValue(
+                int(position_ms / self._duration_ms * _SEEK_SLIDER_RANGE)
+            )
 
-            # Terminal states: natural end, external window close, or error.
-            if state in (                           # type: ignore[union-attr]
-                _vlc.State.Ended,                   # type: ignore[union-attr]
-                _vlc.State.Stopped,                 # type: ignore[union-attr]
-                _vlc.State.Error,                   # type: ignore[union-attr]
-            ):
-                self._timer.stop()
-                self._play_btn.setText("Play")
-                self._surface_label.hide()
-                self._seek_slider.setValue(0)
-                self._time_label.setText("0:00")
-                return
+    def _on_duration_changed(self, duration_ms: int) -> None:
+        """Update the total duration label when the stream reports its length.
 
-            if state != _vlc.State.Playing:  # type: ignore[union-attr]
-                return
+        Args:
+            duration_ms: Total media duration in milliseconds.
+        """
+        self._duration_ms = duration_ms
+        self._duration_label.setText(_fmt_ms(duration_ms))
 
-            # Audio output confirmed ready — apply any pending volume change.
-            if self._volume_dirty:
-                self._player.audio_set_volume(self._vol_slider.value())  # type: ignore[union-attr]
-                self._volume_dirty = False
+    def _on_media_status_changed(
+        self, status: QMediaPlayer.MediaStatus
+    ) -> None:
+        """Reset UI on end of media.
 
-            if self._updating_seek:
-                return
+        Args:
+            status: The new media status value.
+        """
+        if status == QMediaPlayer.MediaStatus.EndOfMedia:
+            self._seek_slider.setValue(0)
+            self._time_label.setText("0:00")
 
-            # Update duration once it becomes available from the stream
-            if self._duration_ms <= 0:
-                dur = self._player.get_length()  # type: ignore[union-attr]
-                if dur > 0:
-                    self._duration_ms = dur
-                    self._duration_label.setText(_fmt_ms(dur))
+    def _on_error_occurred(
+        self, error: QMediaPlayer.Error, error_string: str
+    ) -> None:
+        """Display playback errors in the status label.
 
-            pos_frac = self._player.get_position()  # type: ignore[union-attr]
-            if pos_frac >= 0:
-                self._seek_slider.setValue(int(pos_frac * 1000))
-                if self._duration_ms > 0:
-                    self._time_label.setText(_fmt_ms(int(pos_frac * self._duration_ms)))
-        except Exception:
-            pass
+        Args:
+            error: The error code enum value.
+            error_string: Human-readable description of the error.
+        """
+        if error != QMediaPlayer.Error.NoError:
+            self._status_label.setText(f"Playback error: {error_string}")
