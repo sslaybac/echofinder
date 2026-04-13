@@ -1,8 +1,8 @@
 """Unsupported file type widget (US-050).
 
 Shown for any file type that has no preview widget in the current stage.
-At Stage 4 this includes PDF, audio, and video — preview for those types
-is deferred to Stages 8, 9, and 10 respectively.
+Audio and video are deferred to Stages 9 and 10 respectively.
+PDF is handled by PDFPreviewWidget (Stage 8) and no longer routes here.
 """
 from __future__ import annotations
 
@@ -15,7 +15,6 @@ from echofinder.models.file_node import FileType
 
 # Human-readable descriptions per deferred/unsupported type
 _TYPE_LABEL: dict[FileType, str] = {
-    FileType.PDF: "PDF documents",
     FileType.AUDIO: "Audio files",
     FileType.VIDEO: "Video files",
 }

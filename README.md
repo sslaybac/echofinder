@@ -30,8 +30,9 @@ instantly.
   - Text and code files are displayed with syntax highlighting.
   - Folder contents are shown as a navigable list.
   - Symlinks show their target path with a navigation link.
-  - PDF preview, audio playback, and video playback are not yet implemented
-    and will be added in subsequent stages.
+  - PDF files are rendered inline with multi-page scroll and zoom support.
+  - Audio playback and video playback are not yet implemented and will be
+    added in subsequent stages.
 
 - **Metadata panel** — Displays the SHA-256 hash, MIME type, programming language,
   character encoding, and duplicate count for the selected file. The duplicates row
@@ -60,6 +61,7 @@ instantly.
 | Trash / deletion         | send2trash               | Cross-platform recycle bin support         |
 | Image preview            | Pillow                   | JPEG, PNG, GIF, TIFF, BMP, WebP            |
 | File type detection      | python-magic             | MIME type via libmagic                     |
+| PDF rendering            | PyMuPDF (fitz)           | Multi-page preview with zoom               |
 | Syntax highlighting      | Pygments                 | 500+ languages                             |
 | Encoding detection       | charset-normalizer       | Automatic detection for non-UTF-8 text     |
 | Config file paths        | platformdirs             | OS-appropriate locations                   |
@@ -117,7 +119,6 @@ button in the empty state view) to choose a root directory and begin exploring.
 
 The following preview types are planned and will be added in subsequent stages:
 
-- **PDF preview** (Stage 8) — multi-page rendering with scroll and zoom
 - **Audio playback** (Stage 9) — play/pause/seek controls
 - **Video playback** (Stage 10) — inline video with playback controls
 

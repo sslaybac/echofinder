@@ -9,6 +9,7 @@ dependencies = [
     "pillow>=12.2.0",
     "platformdirs>=4.9.6",
     "pygments>=2.20.0",
+    "pymupdf>=1.27.2.2",
     "pyqt6>=6.11.0",
     "python-magic>=0.4.27",
     "send2trash>=2.1.0",
