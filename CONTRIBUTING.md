@@ -51,6 +51,9 @@ uv run pytest tests/test_hash_cache.py -v
 The test suite is Qt-free: no display server or running application is required. Tests
 that cover modules importing PyQt6 stub the Qt dependency before import.
 
+The test suite runs automatically in CI on every push and pull request to `main`
+(Ubuntu, Python 3.11). A passing badge is shown in the README.
+
 ## Project Structure
 
 ```
