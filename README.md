@@ -1,5 +1,7 @@
 # Echofinder
 
+[![Tests](https://github.com/sslaybac/echofinder/actions/workflows/test.yml/badge.svg)](https://github.com/sslaybac/echofinder/actions/workflows/test.yml)
+
 Echofinder is a cross-platform desktop application for exploring and managing your
 local file system, available on Windows and Linux. It combines a folder-tree interface
 with rich file previewing — displaying images, playing audio and video, rendering
@@ -99,7 +101,7 @@ installed separately from [videolan.org](https://www.videolan.org/).
 ### Clone and install
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/sslaybac/echofinder.git
 cd echofinder
 uv sync
 ```
@@ -120,7 +122,11 @@ button in the empty state view) to choose a root directory and begin exploring.
 
 ## Target Platforms
 
-| Platform        | Status             |
-|-----------------|--------------------|
-| Alma Linux 9    | Supported          |
-| Windows 11      | Supported          |
+| Platform        | Status                      |
+|-----------------|-----------------------------|
+| Alma Linux 9    | Supported, tested in CI     |
+| Windows 11      | Supported, manually tested  |
+
+> **Note:** CI runs on Ubuntu. Windows support is maintained manually; no automated
+> Windows tests are currently configured. VLC and libmagic require separate system
+> installs on Windows — see [Prerequisites](#prerequisites).
