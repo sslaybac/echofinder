@@ -534,6 +534,6 @@ class MainWindow(QMainWindow):
             self._polling_engine.wait(5000)
         if self._hashing_engine.isRunning():
             self._hashing_engine.cancel()
-            self._hashing_engine.wait(5000)
+            self._hashing_engine.wait()
         self._hash_cache.close()
         super().closeEvent(event)

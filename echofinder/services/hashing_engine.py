@@ -29,14 +29,16 @@ _SENTINEL_CANCELLED = object()
 # File-level helpers (run on pool threads — no Qt, no shared state)
 # ---------------------------------------------------------------------------
 
-def _compute_hash(path: str) -> str:
+def _compute_hash(path: str, is_cancelled=None) -> str | None:
     """Compute the SHA-256 hex digest of a file using 64 KB read chunks.
 
     Args:
         path: Absolute path string to the file to hash.
+        is_cancelled: Optional zero-argument callable; checked between chunks.
+            Returns ``None`` immediately if it returns ``True``.
 
     Returns:
-        Lowercase hex-encoded SHA-256 digest string.
+        Lowercase hex-encoded SHA-256 digest string, or ``None`` if cancelled.
 
     Raises:
         OSError: If the file cannot be opened or read.
@@ -44,6 +46,8 @@ def _compute_hash(path: str) -> str:
     sha256 = hashlib.sha256()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(65536), b""):
+            if is_cancelled is not None and is_cancelled():
+                return None
             sha256.update(chunk)
     return sha256.hexdigest()
 
@@ -167,12 +171,16 @@ class _HashTask(QRunnable):
             return
 
         try:
-            hash_val = _compute_hash(path)
+            hash_val = _compute_hash(path, self._is_cancelled)
         except PermissionError:
             logger.debug("Skipped (PermissionError): %s", path)
             self._on_done(False, None, None, None)
             return
         except OSError:
+            self._on_done(False, None, None, None)
+            return
+
+        if hash_val is None:
             self._on_done(False, None, None, None)
             return
 
