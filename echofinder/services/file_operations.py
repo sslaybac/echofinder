@@ -6,11 +6,14 @@ parameters passed by the UI layer.
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Literal, Optional
+
+logger = logging.getLogger(__name__)
 
 
 ConflictAction = Literal["overwrite", "skip"]
@@ -65,15 +68,19 @@ class RenameResult:
 
 def rename_item(old_path: Path, new_path: Path) -> RenameResult:
     """Rename *old_path* to *new_path* using os.rename()."""
+    logger.info("Rename started: %s → %s", old_path, new_path.name)
     try:
         os.rename(str(old_path), str(new_path))
+        logger.info("Rename completed: %s", new_path)
         return RenameResult(success=True)
     except PermissionError:
+        logger.exception("Permission error renaming %s", old_path)
         return RenameResult(
             success=False,
             error_msg=f"Permission denied: cannot rename \u2018{old_path.name}\u2019.",
         )
     except OSError:
+        logger.exception("OSError renaming %s", old_path)
         return RenameResult(
             success=False,
             error_msg=f"Could not rename \u2018{old_path.name}\u2019.",
@@ -86,16 +93,20 @@ def rename_item(old_path: Path, new_path: Path) -> RenameResult:
 
 def delete_item(path: Path) -> DeleteResult:
     """Send *path* to the system trash via send2trash."""
+    logger.info("Delete started: %s", path)
     try:
         from send2trash import send2trash  # type: ignore[import]
         send2trash(str(path))
+        logger.info("Delete completed: %s", path)
         return DeleteResult(success=True)
     except PermissionError:
+        logger.exception("Permission error deleting %s", path)
         return DeleteResult(
             success=False,
             error_msg=f"Permission denied: cannot delete \u2018{path.name}\u2019.",
         )
     except OSError:
+        logger.exception("OSError deleting %s", path)
         return DeleteResult(
             success=False,
             error_msg=(
@@ -104,6 +115,7 @@ def delete_item(path: Path) -> DeleteResult:
             ),
         )
     except Exception:
+        logger.exception("Unexpected error deleting %s", path)
         return DeleteResult(
             success=False,
             error_msg=f"Could not delete \u2018{path.name}\u2019.",
@@ -175,6 +187,7 @@ def move_item(
     resolve_conflict: Callable[[str], tuple[ConflictAction, bool]],
     cache_update: Callable[[str, str], None],
     tree_refresh: Callable[[Path, Path], None],
+    initiated_by: str = "unknown",
 ) -> MoveResult:
     """Move *src* into *dst_parent*.
 
@@ -190,8 +203,12 @@ def move_item(
         Update the hash-cache entry after a successful file move.
     tree_refresh(old_path, new_path)
         Signal the UI to refresh affected tree nodes.
+    initiated_by
+        Interaction path that triggered the move: 'keyboard', 'drag-and-drop',
+        or 'dialog'.
     """
     dst = dst_parent / src.name
+    logger.info("Move started: %s → %s (initiated_by=%s)", src, dst, initiated_by)
 
     # Guard: cannot move a folder into itself or a descendant.
     try:
@@ -235,11 +252,13 @@ def move_item(
             else:
                 dst.unlink()
         except PermissionError:
+            logger.exception("Permission error overwriting %s", dst)
             return MoveResult(
                 success=False,
                 error_msg=f"Permission denied overwriting \u2018{dst.name}\u2019.",
             )
         except OSError:
+            logger.exception("OSError overwriting %s", dst)
             return MoveResult(
                 success=False,
                 error_msg=f"Could not overwrite \u2018{dst.name}\u2019.",
@@ -252,11 +271,13 @@ def move_item(
             else:
                 shutil.copy2(str(src), str(dst))
         except PermissionError:
+            logger.exception("Permission error copying %s", src)
             return MoveResult(
                 success=False,
                 error_msg=f"Permission denied copying \u2018{src.name}\u2019.",
             )
         except OSError:
+            logger.exception("OSError copying %s", src)
             return MoveResult(
                 success=False,
                 error_msg=f"Could not copy \u2018{src.name}\u2019.",
@@ -273,18 +294,23 @@ def move_item(
         try:
             os.rename(str(src), str(dst))
         except PermissionError:
+            logger.exception("Permission error moving %s", src)
             return MoveResult(
                 success=False,
                 error_msg=f"Permission denied: cannot move \u2018{src.name}\u2019.",
             )
         except OSError:
+            logger.exception("OSError moving %s", src)
             return MoveResult(
                 success=False,
                 error_msg=f"Could not move \u2018{src.name}\u2019.",
             )
 
+    logger.debug("Cache update step: %s → %s", src, dst)
     cache_update(str(src), str(dst))
+    logger.debug("Tree refresh signal after move: %s → %s", src, dst)
     tree_refresh(src, dst)
+    logger.info("Move completed: %s", dst)
     return MoveResult(success=True)
 
 
@@ -351,10 +377,13 @@ def _do_merge(
                         continue
                 else:
                     os.rename(str(src_file), str(dst_file))
+                logger.debug("Cache update step (merge): %s → %s", src_file, dst_file)
                 cache_update(str(src_file), str(dst_file))
             except PermissionError:
+                logger.exception("Permission error during merge for %s", src_file)
                 failures.append((str(src_file), "Permission denied."))
             except OSError:
+                logger.exception("OSError during merge for %s", src_file)
                 failures.append((str(src_file), "Could not move file."))
 
     # Remove whatever remains of the source directory tree
@@ -363,5 +392,7 @@ def _do_merge(
     except OSError:
         pass
 
+    logger.debug("Tree refresh signal after merge: %s → %s", src_dir, dst_dir)
     tree_refresh(src_dir, dst_dir)
+    logger.info("Merge completed: %s → %s (%d failure(s))", src_dir, dst_dir, len(failures))
     return MoveResult(success=True, failures=failures)

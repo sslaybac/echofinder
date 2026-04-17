@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
 import threading
 from pathlib import Path
 
 from platformdirs import user_config_dir
+
+logger = logging.getLogger(__name__)
 
 _CREATE_TABLE = """
     CREATE TABLE IF NOT EXISTS files (
@@ -67,8 +70,10 @@ class HashCache:
             conn.commit()
             # Validate the DB is readable and well-formed
             conn.execute("SELECT COUNT(*) FROM files").fetchone()
+            logger.debug("Cache database opened: %s", self._db_path)
             return conn
-        except (sqlite3.DatabaseError, sqlite3.OperationalError):
+        except (sqlite3.DatabaseError, sqlite3.OperationalError) as exc:
+            logger.warning("Cache corruption detected (%s); resetting database: %s", type(exc).__name__, exc)
             self._reset_db()
             conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
             conn.execute("PRAGMA case_sensitive_like = ON")
@@ -81,6 +86,7 @@ class HashCache:
         try:
             if self._db_path.exists():
                 self._db_path.unlink()
+                logger.info("Corrupted cache file deleted; fresh database will be created: %s", self._db_path)
         except OSError:
             pass
         self._was_reset = True
@@ -103,8 +109,11 @@ class HashCache:
                     (path, size, mtime),
                 )
                 row = cur.fetchone()
+            if row:
+                logger.debug("Cache hit: %s", path)
             return row[0] if row else None
-        except sqlite3.Error:
+        except (sqlite3.DatabaseError, sqlite3.OperationalError):
+            logger.exception("Cache read error for %s", path)
             return None
 
     def store(
@@ -126,11 +135,13 @@ class HashCache:
                     (path, size, mtime, hash_val, filetype, language),
                 )
                 self._conn.commit()
-        except sqlite3.Error:
-            pass
+            logger.debug("Cache write: %s", path)
+        except (sqlite3.DatabaseError, sqlite3.OperationalError):
+            logger.exception("Cache write error for %s", path)
 
     def prune(self, root: str) -> None:
         """Remove entries under *root* whose paths no longer exist on disk."""
+        logger.debug("Cache prune starting for root: %s", root)
         root_prefix = root.rstrip("/\\") + os.sep
         try:
             with self._lock:
@@ -147,8 +158,9 @@ class HashCache:
                         [(p,) for p in missing],
                     )
                     self._conn.commit()
-        except sqlite3.Error:
-            pass
+            logger.info("Cache prune removed %d stale entries under %s", len(missing), root)
+        except (sqlite3.DatabaseError, sqlite3.OperationalError):
+            logger.exception("Cache prune error for root %s", root)
 
     def get_file_metadata(self, path: str) -> dict | None:
         """Return {hash, filetype, language} for *path* if cached; else None."""
@@ -182,6 +194,7 @@ class HashCache:
 
     def update_path(self, old_path: str, new_path: str) -> None:
         """Update a cache entry's path, preserving all other values (called by Stage 6)."""
+        logger.debug("Cache update_path: %s → %s", old_path, new_path)
         try:
             with self._lock:
                 self._conn.execute(
@@ -189,8 +202,8 @@ class HashCache:
                     (new_path, old_path),
                 )
                 self._conn.commit()
-        except sqlite3.Error:
-            pass
+        except (sqlite3.DatabaseError, sqlite3.OperationalError):
+            logger.exception("Cache update_path error: %s → %s", old_path, new_path)
 
     def get_cached_stat(self, path: str) -> tuple[int, float] | None:
         """Return the cached (size, mtime) for *path*, or None if not cached.

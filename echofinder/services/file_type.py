@@ -1,7 +1,10 @@
+import logging
 import os
 from pathlib import Path
 
 from echofinder.models.file_node import FileType
+
+logger = logging.getLogger(__name__)
 
 try:
     import magic as _magic
@@ -74,24 +77,33 @@ class FileTypeResolver:
             The ``FileType`` value for *path*.
         """
         if path.is_symlink():
-            return self._resolve_symlink(path, root)
+            result = self._resolve_symlink(path, root)
+            logger.debug("Resolved %s: mime=None → %s (symlink)", path, result)
+            return result
         if path.is_dir():
+            logger.debug("Resolved %s: mime=None → %s (directory)", path, FileType.FOLDER)
             return FileType.FOLDER
         if not path.is_file():
+            logger.debug("Resolved %s: mime=None → %s (not a file)", path, FileType.UNKNOWN)
             return FileType.UNKNOWN
 
         # Primary: MIME detection
+        mime: str | None = None
         if _MAGIC_AVAILABLE:
             try:
-                mime: str = _magic.from_file(str(path), mime=True)
+                mime = _magic.from_file(str(path), mime=True)
                 result = self._mime_to_type(mime)
                 if result != FileType.UNKNOWN:
+                    logger.debug("Resolved %s: mime=%s → %s", path, mime, result)
                     return result
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("python-magic raised exception for %s: %s", path, exc)
+                mime = None
 
         # Fallback: extension
-        return self._ext_to_type(path.suffix.lower())
+        result = self._ext_to_type(path.suffix.lower())
+        logger.debug("Resolved %s: mime=%s → %s (extension fallback)", path, mime, result)
+        return result
 
     def _resolve_symlink(self, path: Path, root: Path | None) -> FileType:
         """Determine whether a symlink target is inside or outside *root*.

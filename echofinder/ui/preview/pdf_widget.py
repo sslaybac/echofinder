@@ -11,9 +11,12 @@ Design notes:
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import fitz  # PyMuPDF
+
+logger = logging.getLogger(__name__)
 from PyQt6.QtCore import QEvent, QObject, Qt, QTimer
 from PyQt6.QtGui import QImage, QKeyEvent, QPixmap, QWheelEvent
 from PyQt6.QtWidgets import (
@@ -133,9 +136,16 @@ class PDFPreviewWidget(QWidget):
 
         try:
             self._doc = fitz.open(str(path))
-        except Exception:
+        except (fitz.FileDataError, fitz.FileNotFoundError) as exc:
+            logger.warning("Failed to open PDF %s: %s", path, exc)
             self._show_error("Unable to open this PDF.")
             return
+        except Exception:
+            logger.warning("Failed to open PDF %s (unexpected error)", path)
+            self._show_error("Unable to open this PDF.")
+            return
+
+        logger.debug("PDF opened: %s (%d pages)", path, self._doc.page_count)
 
         if self._doc.page_count == 0:
             self._show_error("This PDF has no pages.")
@@ -306,20 +316,25 @@ class PDFPreviewWidget(QWidget):
         self, idx: int, lbl: _PageLabel, zoom: float, avail_w: int
     ) -> None:
         """Render page *idx* at display resolution and set its pixmap on *lbl*."""
-        page = self._doc[idx]
-        rect = page.rect
-        scale = (avail_w / rect.width) * zoom
-        matrix = fitz.Matrix(scale, scale)
-        pix = page.get_pixmap(matrix=matrix, alpha=False)
+        try:
+            page = self._doc[idx]
+            rect = page.rect
+            scale = (avail_w / rect.width) * zoom
+            matrix = fitz.Matrix(scale, scale)
+            pix = page.get_pixmap(matrix=matrix, alpha=False)
 
-        image = QImage(
-            pix.samples,
-            pix.width,
-            pix.height,
-            pix.stride,
-            QImage.Format.Format_RGB888,
-        )
-        lbl.set_rendered(QPixmap.fromImage(image))
+            image = QImage(
+                pix.samples,
+                pix.width,
+                pix.height,
+                pix.stride,
+                QImage.Format.Format_RGB888,
+            )
+            lbl.set_rendered(QPixmap.fromImage(image))
+        except Exception:
+            logger.exception(
+                "Unexpected error rendering page %d of %s", idx, self._current_path
+            )
 
     def _clear_page_labels(self) -> None:
         """Remove all page labels from the layout and schedule them for deletion."""
@@ -333,6 +348,7 @@ class PDFPreviewWidget(QWidget):
         """Close the fitz document and clear all rendered pages."""
         self._clear_page_labels()
         if self._doc is not None:
+            logger.debug("PDF closed: %s", self._current_path)
             self._doc.close()
             self._doc = None
 

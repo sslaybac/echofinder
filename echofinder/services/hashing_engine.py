@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import threading
 from pathlib import Path
@@ -9,6 +10,8 @@ from PyQt6.QtCore import QRunnable, QThread, QThreadPool, pyqtSignal
 
 from echofinder.models.hash_cache import HashCache
 from echofinder.models.scanner import walk_files
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -46,8 +49,12 @@ def _detect_mime(path: str) -> str | None:
     """
     try:
         import magic
-        return magic.from_file(path, mime=True)
-    except Exception:
+        result = magic.from_file(path, mime=True)
+        if result is None:
+            logger.debug("python-magic returned None for %s", path)
+        return result
+    except Exception as exc:
+        logger.debug("python-magic raised exception for %s: %s", path, exc)
         return None
 
 
@@ -68,6 +75,7 @@ def _detect_language(path: str) -> str | None:
             lexer = get_lexer_for_filename(path)
             return lexer.name
         except ClassNotFound:
+            logger.debug("Pygments found no language match for %s", path)
             return None
     except Exception:
         return None
@@ -119,6 +127,13 @@ class _HashTask(QRunnable):
         the result in the cache, and invokes ``on_done``.  Any I/O error
         results in ``on_done(False, None, None, None)``.
         """
+        try:
+            self._run_impl()
+        except Exception:
+            logger.exception("Unexpected error in hash task for %s", self._path)
+            self._on_done(False, None, None, None)
+
+    def _run_impl(self) -> None:
         if self._is_cancelled():
             self._on_done(False, None, None, None)
             return
@@ -142,6 +157,7 @@ class _HashTask(QRunnable):
         try:
             hash_val = _compute_hash(path)
         except PermissionError:
+            logger.debug("Skipped (PermissionError): %s", path)
             self._on_done(False, None, None, None)
             return
         except OSError:
@@ -152,6 +168,7 @@ class _HashTask(QRunnable):
         language = _detect_language(path)
 
         self._cache.store(path, size, mtime, hash_val, filetype, language)
+        logger.debug("Hashed successfully: %s", path)
         self._on_done(False, hash_val, filetype, language)
 
 
@@ -218,17 +235,21 @@ class HashingEngine(QThread):
             s = str(p)
             if os.path.islink(s):
                 symlinks.append(s)
+                logger.debug("Skipped (symlink): %s", s)
             else:
                 regular.append(s)
 
         total = len(symlinks) + len(regular)
+        logger.info("Hashing run started: root=%s, total=%d files", root, total)
         self.hashing_started.emit(total)
 
         if total == 0:
+            logger.info("Hashing run completed: 0 files to process")
             self.hashing_complete.emit()
             return
 
         if self._cancelled:
+            logger.info("Hashing run cancelled before submission (root changed)")
             self.hashing_cancelled.emit()
             return
 
@@ -248,6 +269,8 @@ class HashingEngine(QThread):
         for path_str in regular:
             if self._cancelled:
                 break
+
+            logger.debug("Submitted to hash queue: %s", path_str)
 
             def make_callback(p: str):
                 def on_done(
@@ -280,8 +303,15 @@ class HashingEngine(QThread):
             semaphore.acquire()
 
         if self._cancelled:
+            logger.info("Hashing run cancelled (root changed mid-run)")
             self.hashing_cancelled.emit()
         else:
+            cache_hits = counter[1]
+            actively_hashed = submitted - cache_hits
+            logger.info(
+                "Hashing run completed: processed=%d, cache_hits=%d, hashed=%d",
+                counter[0], cache_hits, actively_hashed,
+            )
             self.hashing_complete.emit()
 
     def rehash_paths(self, paths: list[str]) -> None:

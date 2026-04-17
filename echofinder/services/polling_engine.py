@@ -28,6 +28,7 @@ mutations happen on the main thread in response to these signals.
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 from pathlib import Path
@@ -35,6 +36,8 @@ from pathlib import Path
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from echofinder.models.hash_cache import HashCache
+
+logger = logging.getLogger(__name__)
 
 # Polling interval: 30 seconds.  Chosen to balance responsiveness to external
 # changes (e.g. another application creating or deleting files) against
@@ -156,6 +159,19 @@ class PollingEngine(QThread):
         Checks for cancellation (root change or stop) between each step so
         that a root change during a cycle terminates quickly and cleanly.
         """
+        logger.debug(
+            "Polling cycle started: root=%s, interval=%ds",
+            root, POLLING_INTERVAL_SECONDS,
+        )
+
+        try:
+            self._run_cycle_impl(root, known_paths)
+        except OSError as exc:
+            logger.warning("OSError during polling cycle for %s: %s", root, exc)
+        except Exception:
+            logger.exception("Unexpected error during polling cycle for %s", root)
+
+    def _run_cycle_impl(self, root: Path, known_paths: frozenset[str]) -> None:
         # ----------------------------------------------------------------
         # Step 1 — Removals
         # ----------------------------------------------------------------
@@ -169,8 +185,12 @@ class PollingEngine(QThread):
             try:
                 if not os.path.exists(path_str):
                     removed.append(path_str)
-            except OSError:
+            except OSError as exc:
+                logger.warning("OSError checking existence of %s: %s", path_str, exc)
                 removed.append(path_str)
+
+        for path_str in removed:
+            logger.info("Polling detected removal: %s", path_str)
 
         if removed:
             self.entries_removed.emit(removed)
@@ -193,13 +213,17 @@ class PollingEngine(QThread):
                 if os.path.isdir(path_str) or os.path.islink(path_str):
                     continue
                 stat = os.stat(path_str)
-            except (PermissionError, OSError):
+            except (PermissionError, OSError) as exc:
+                logger.warning("OSError stat-ing %s: %s", path_str, exc)
                 continue  # permission errors skip this file and continue
             cached = self._cache.get_cached_stat(path_str)
             if cached is not None:
                 cached_size, cached_mtime = cached
                 if stat.st_size != cached_size or stat.st_mtime != cached_mtime:
                     changed.append(path_str)
+
+        for path_str in changed:
+            logger.info("Polling detected change: %s", path_str)
 
         if changed:
             self.entries_changed.emit(changed)
@@ -211,9 +235,13 @@ class PollingEngine(QThread):
         # loaded tree.  Uses the same onerror=ignore pattern as walk_files()
         # in scanner.py so inaccessible directories are silently skipped.
         added: list[str] = []
+
+        def _walk_onerror(exc: OSError) -> None:
+            logger.warning("OSError during os.walk at %s: %s", getattr(exc, "filename", "?"), exc)
+
         try:
             for dirpath, dirnames, filenames in os.walk(
-                str(root), followlinks=False, onerror=lambda _: None
+                str(root), followlinks=False, onerror=_walk_onerror
             ):
                 if self._should_abort():
                     return
@@ -227,11 +255,19 @@ class PollingEngine(QThread):
                     entry = os.path.join(dirpath, name)
                     if entry not in known_paths:
                         added.append(entry)
-        except OSError:
-            pass
+        except OSError as exc:
+            logger.warning("OSError during os.walk for root %s: %s", root, exc)
+
+        for path_str in added:
+            logger.info("Polling detected addition: %s", path_str)
 
         if added:
             self.entries_added.emit(added)
+
+        logger.debug(
+            "Polling cycle completed: removed=%d, changed=%d, added=%d",
+            len(removed), len(changed), len(added),
+        )
 
     # ------------------------------------------------------------------
     # Helpers

@@ -8,9 +8,12 @@ Controls: play/pause toggle, stop, seek slider, volume slider.
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QTimer
+
+logger = logging.getLogger(__name__)
 from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -195,6 +198,13 @@ class AudioPreviewWidget(QWidget):
                 self._instance = _vlc.Instance("--no-video", "--no-xlib")  # type: ignore[union-attr]
             if self._player is None:
                 self._player = self._instance.media_player_new()  # type: ignore[union-attr]
+                # Attach VLC error event listener (runs on VLC's internal thread;
+                # only logging is safe here — no Qt API calls).
+                em = self._player.event_manager()  # type: ignore[union-attr]
+                em.event_attach(
+                    _vlc.EventType.MediaPlayerEncounteredError,  # type: ignore[union-attr]
+                    self._on_vlc_error,
+                )
 
             # Keep a reference to the Media object for the lifetime of playback.
             # VLC's C layer holds a raw pointer; if Python GC collects the object
@@ -204,7 +214,9 @@ class AudioPreviewWidget(QWidget):
             # Do NOT call audio_set_volume() here: the VLC audio output is created
             # lazily on the first play() call, so calling it before play() crashes
             # with a null-pointer dereference inside libvlc (VLC 3.x bug).
+            logger.debug("VLC media instance created for %s", path)
         except Exception as exc:
+            logger.exception("VLC initialization error for %s", path)
             self._status_label.setText(f"Could not load file: {exc}")
             self._play_btn.setEnabled(False)
             return
@@ -219,6 +231,8 @@ class AudioPreviewWidget(QWidget):
         object. The VLC instance and player are retained so they can be reused
         on the next ``load()`` call without re-initializing libvlc.
         """
+        if self._current_path is not None:
+            logger.debug("VLC media instance released for %s", self._current_path)
         self._stop_playback()
         self._media = None   # release Python reference; VLC player retains its own
         self._current_path = None
@@ -322,6 +336,13 @@ class AudioPreviewWidget(QWidget):
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _on_vlc_error(self, event) -> None:
+        """Log VLC error events received from the VLC event manager.
+
+        Called on VLC's internal thread — must not access any Qt objects.
+        """
+        logger.warning("VLC error event: %s", event.type)
 
     def _stop_playback(self) -> None:
         """Stop the VLC player and halt the poll timer.

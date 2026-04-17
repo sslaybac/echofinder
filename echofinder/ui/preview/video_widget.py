@@ -27,9 +27,12 @@ update and the user drag occur simultaneously.
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QUrl
+
+logger = logging.getLogger(__name__)
 from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PyQt6.QtMultimediaWidgets import QVideoWidget
 from PyQt6.QtWidgets import (
@@ -198,6 +201,7 @@ class VideoPreviewWidget(QWidget):
         self._status_label.setText("")
 
         self._player.setSource(QUrl.fromLocalFile(str(path)))
+        logger.debug("Video source set: %s", path)
 
     def release(self) -> None:
         """Stop playback and clear the media source.
@@ -205,6 +209,7 @@ class VideoPreviewWidget(QWidget):
         Called when the user navigates to a different file or the preview
         pane is cleared.  Drops the media reference and resets all UI fields.
         """
+        logger.debug("Video source released")
         self._player.stop()
         self._player.setSource(QUrl())   # clear source
         self._duration_ms = 0
@@ -309,4 +314,5 @@ class VideoPreviewWidget(QWidget):
             error_string: Human-readable description of the error.
         """
         if error != QMediaPlayer.Error.NoError:
+            logger.warning("Video playback error (%s): %s", error, error_string)
             self._status_label.setText(f"Playback error: {error_string}")
