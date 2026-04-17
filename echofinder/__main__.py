@@ -34,8 +34,24 @@ def _configure_logging() -> None:
     root_logger.addHandler(stream_handler)
 
 
+def _register_epub_scheme() -> None:
+    try:
+        from PyQt6.QtWebEngineCore import QWebEngineUrlScheme
+        scheme = QWebEngineUrlScheme(b"echofinder-epub")
+        scheme.setFlags(
+            QWebEngineUrlScheme.Flag.SecureScheme
+            | QWebEngineUrlScheme.Flag.LocalScheme
+            | QWebEngineUrlScheme.Flag.LocalAccessAllowed
+            | QWebEngineUrlScheme.Flag.CorsEnabled
+        )
+        QWebEngineUrlScheme.registerScheme(scheme)
+    except ImportError:
+        pass
+
+
 def main() -> None:
     _configure_logging()
+    _register_epub_scheme()  # must precede QApplication
     app = QApplication(sys.argv)
     app.setApplicationName("Echofinder")
     app.setOrganizationName("Echofinder")

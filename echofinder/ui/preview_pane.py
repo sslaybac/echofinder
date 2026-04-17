@@ -1,15 +1,16 @@
 """Preview pane — QStackedWidget that orchestrates all content widgets.
 
-Resolver precedence (Stage 4 spec §4, updated in Stage 10):
+Resolver precedence (Stage 4 spec §4, updated in Stage 11):
   1. Empty state  — no selection yet
   2. Symlink      — SYMLINK_INTERNAL / SYMLINK_EXTERNAL
   3. Folder       — FOLDER
   4. Image        — IMAGE  (MIME primary, extension fallback)
   5. Text / Code  — TEXT / CODE
   6. PDF          — PDF (Stage 8)
-  7. Audio        — AUDIO (Stage 9)
-  8. Video        — VIDEO (Stage 10)
-  9. Unsupported  — UNKNOWN
+  7. EPUB         — EPUB (Stage 11)
+  8. Audio        — AUDIO (Stage 9)
+  9. Video        — VIDEO (Stage 10)
+ 10. Unsupported  — UNKNOWN
 
 All filesystem I/O is performed through echofinder.services.preview; individual
 widgets receive pre-loaded data only.
@@ -29,6 +30,7 @@ from echofinder.ui.empty_state import EmptyStateWidget
 from echofinder.ui.preview.folder_widget import FolderContentsWidget
 from echofinder.ui.preview.image_widget import ImagePreviewWidget
 from echofinder.ui.preview.audio_widget import AudioPreviewWidget
+from echofinder.ui.preview.epub_widget import EpubPreviewWidget, _WEBENGINE_AVAILABLE
 from echofinder.ui.preview.pdf_widget import PDFPreviewWidget
 from echofinder.ui.preview.video_widget import VideoPreviewWidget
 from echofinder.ui.preview.symlink_widget import SymlinkWidget
@@ -36,7 +38,7 @@ from echofinder.ui.preview.text_widget import TextPreviewWidget
 from echofinder.ui.preview.unreadable_widget import UnreadableWidget
 from echofinder.ui.preview.unsupported_widget import UnsupportedWidget
 
-# Widget slot indices — order must remain stable; new stages append before UNSUPPORTED
+# Widget slot indices — order must remain stable; new stages append at the end
 _IDX_EMPTY = 0
 _IDX_IMAGE = 1
 _IDX_TEXT = 2
@@ -47,6 +49,7 @@ _IDX_UNREADABLE = 6
 _IDX_PDF = 7
 _IDX_AUDIO = 8
 _IDX_VIDEO = 9
+_IDX_EPUB = 10
 
 
 class PreviewPane(QStackedWidget):
@@ -78,6 +81,7 @@ class PreviewPane(QStackedWidget):
         self._pdf = PDFPreviewWidget()
         self._audio = AudioPreviewWidget()
         self._video = VideoPreviewWidget()
+        self._epub = EpubPreviewWidget()
 
         for widget in (
             self._empty,       # _IDX_EMPTY       = 0
@@ -90,6 +94,7 @@ class PreviewPane(QStackedWidget):
             self._pdf,         # _IDX_PDF          = 7
             self._audio,       # _IDX_AUDIO        = 8
             self._video,       # _IDX_VIDEO        = 9
+            self._epub,        # _IDX_EPUB         = 10
         ):
             self.addWidget(widget)
 
@@ -110,6 +115,7 @@ class PreviewPane(QStackedWidget):
         self._pdf.release()
         self._audio.release()
         self._video.release()
+        self._epub.release()
         self.encoding_detected.emit("")
         self.setCurrentIndex(_IDX_EMPTY)
 
@@ -126,6 +132,8 @@ class PreviewPane(QStackedWidget):
             self._audio.release()
         if file_type != FileType.VIDEO:
             self._video.release()
+        if file_type != FileType.EPUB:
+            self._epub.release()
 
         if file_type in (FileType.SYMLINK_INTERNAL, FileType.SYMLINK_EXTERNAL):
             self.encoding_detected.emit("")
@@ -150,6 +158,9 @@ class PreviewPane(QStackedWidget):
 
         elif file_type == FileType.VIDEO:
             self._show_video(node)
+
+        elif file_type == FileType.EPUB:
+            self._show_epub(node)
 
         else:
             # UNKNOWN → unsupported
@@ -269,3 +280,21 @@ class PreviewPane(QStackedWidget):
             return
         self._video.load(node.path)
         self.setCurrentIndex(_IDX_VIDEO)
+
+    def _show_epub(self, node: FileNode) -> None:
+        """Hand the EPUB path to the EPUB widget; falls back when WebEngine absent.
+
+        Args:
+            node: The ``EPUB`` node to preview.
+        """
+        self.encoding_detected.emit("")
+        if not _WEBENGINE_AVAILABLE:
+            self._unsupported.show_for(node.path, FileType.EPUB)
+            self.setCurrentIndex(_IDX_UNSUPPORTED)
+            return
+        if node.permission == PermissionState.NOT_READABLE:
+            self._unreadable.show_for(node.path, is_permission_error=True)
+            self.setCurrentIndex(_IDX_UNREADABLE)
+            return
+        self._epub.load(node.path)
+        self.setCurrentIndex(_IDX_EPUB)

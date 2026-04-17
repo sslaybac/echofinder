@@ -17,6 +17,7 @@ class FileType(Enum):
     VIDEO = auto()
     AUDIO = auto()
     PDF = auto()
+    EPUB = auto()
     TEXT = auto()
     CODE = auto()
     SYMLINK_INTERNAL = auto()

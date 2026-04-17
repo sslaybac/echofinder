@@ -170,6 +170,8 @@ class FileTypeResolver:
             return FileType.AUDIO
         if mime == "application/pdf":
             return FileType.PDF
+        if mime == "application/epub+zip":
+            return FileType.EPUB
         # text/* and application/* code types — defer to extension for text/code split
         return FileType.UNKNOWN
 
@@ -193,6 +195,8 @@ class FileTypeResolver:
             return FileType.AUDIO
         if ext == ".pdf":
             return FileType.PDF
+        if ext == ".epub":
+            return FileType.EPUB
         if ext in _CODE_EXT:
             return FileType.CODE
         if ext in _TEXT_EXT:

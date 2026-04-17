@@ -17,6 +17,7 @@ from echofinder.models.file_node import FileType
 _TYPE_LABEL: dict[FileType, str] = {
     FileType.AUDIO: "Audio files",
     FileType.VIDEO: "Video files",
+    FileType.EPUB: "EPUB files",
 }
 
 

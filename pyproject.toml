@@ -16,11 +16,13 @@ keywords = [
 ]
 dependencies = [
     "charset-normalizer>=3.4.7",
+    "ebooklib>=0.20",
     "pillow>=12.2.0",
     "platformdirs>=4.9.6",
     "pygments>=2.20.0",
     "pymupdf>=1.27.2.2",
     "pyqt6>=6.11.0",
+    "pyqt6-webengine>=6.11.0",
     "python-magic>=0.4.27",
     "python-vlc>=3.0.21203",
     "send2trash>=2.1.0",
