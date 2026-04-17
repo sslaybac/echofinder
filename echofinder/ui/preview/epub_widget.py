@@ -10,9 +10,12 @@ stub so the application never crashes on import.
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from PyQt6.QtCore import QBuffer, QByteArray, QEvent, QIODevice, QUrl, Qt
+
+logger = logging.getLogger(__name__)
 from PyQt6.QtGui import QKeyEvent
 from PyQt6.QtWidgets import (
     QHBoxLayout,
@@ -149,7 +152,8 @@ if _WEBENGINE_AVAILABLE:
             path_str = str(path)
             try:
                 book = _epub.read_epub(str(path))
-            except Exception:
+            except Exception as exc:
+                logger.warning("Failed to open EPUB %s: %s", path, exc)
                 self._doc = None
                 self._handler.set_book(None)
                 self._view.setUrl(QUrl("about:blank"))
@@ -173,6 +177,7 @@ if _WEBENGINE_AVAILABLE:
             zoom = self._zoom_state.get(path_str, _ZOOM_DEFAULT)
             self._view.setZoomFactor(zoom)
 
+            logger.debug("EPUB opened: %s (%d chapters)", path, len(self._chapters))
             self._navigate_to_chapter(chapter_idx, restore_scroll=True)
 
         def release(self) -> None:
@@ -183,6 +188,7 @@ if _WEBENGINE_AVAILABLE:
             self._doc = None
             self._handler.set_book(None)
             self._chapters = []
+            logger.debug("EPUB released: %s", self._path_str)
 
         # ------------------------------------------------------------------
         # Chapter navigation

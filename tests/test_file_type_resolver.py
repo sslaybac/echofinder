@@ -4,6 +4,8 @@ Run with:  uv run pytest tests/test_file_type_resolver.py -v
 """
 from __future__ import annotations
 
+import io
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -153,6 +155,32 @@ def test_resolve_video_mp4_by_extension(tmp_path: Path, resolver: FileTypeResolv
     # Valid ftyp box header so magic identifies it as video/mp4
     f.write_bytes(b"\x00\x00\x00\x18ftypisom\x00\x00\x00\x00isomavc1" + b"\x00" * 100)
     assert resolver.resolve(f) == FileType.VIDEO
+
+
+def test_resolve_epub_by_mime(tmp_path: Path, resolver: FileTypeResolver) -> None:
+    # A ZIP whose first entry is an uncompressed "mimetype" file containing
+    # "application/epub+zip" is what libmagic uses to identify EPUB files.
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        info = zipfile.ZipInfo("mimetype")
+        info.compress_type = zipfile.ZIP_STORED
+        zf.writestr(info, "application/epub+zip")
+        zf.writestr("META-INF/container.xml", "<container/>")
+    f = tmp_path / "book.epub"
+    f.write_bytes(buf.getvalue())
+    assert resolver.resolve(f) == FileType.EPUB
+
+
+def test_resolve_epub_by_extension(tmp_path: Path, resolver: FileTypeResolver) -> None:
+    # Arbitrary bytes so magic cannot identify the MIME type; the extension
+    # fallback must return EPUB.
+    f = tmp_path / "book.epub"
+    f.write_bytes(b"\x00" * 16)
+    assert resolver.resolve(f) == FileType.EPUB
+
+
+def test_mime_to_file_type_epub() -> None:
+    assert FileTypeResolver.mime_to_file_type("application/epub+zip") == FileType.EPUB
 
 
 # ---------------------------------------------------------------------------
