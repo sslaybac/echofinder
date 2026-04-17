@@ -192,7 +192,7 @@ class HashingEngine(QThread):
     # Emitted after walk_files completes; total is the number of paths to process
     hashing_started = pyqtSignal(int)
     # Emitted after each file is processed (cache hit or freshly hashed)
-    progress_updated = pyqtSignal(int, int, int)   # current, total, from_cache
+    progress_updated = pyqtSignal(int, int, int, str)   # current, total, from_cache, filename
     # Emitted when all files have been processed successfully
     hashing_complete = pyqtSignal()
     # Emitted when the run was cancelled before completing
@@ -221,7 +221,7 @@ class HashingEngine(QThread):
 
         # Latest progress snapshot written by pool callbacks under _progress_lock;
         # read and cleared by _drain_results().  None means no update pending.
-        self._pending_progress: tuple[int, int, int] | None = None
+        self._pending_progress: tuple[int, int, int, str] | None = None
         self._progress_lock = threading.Lock()
 
         # Per-run diagnostics reset in start_hashing().
@@ -303,7 +303,7 @@ class HashingEngine(QThread):
         semaphore = threading.Semaphore(0)
 
         with self._progress_lock:
-            self._pending_progress = (counter[0], total, counter[1])
+            self._pending_progress = (counter[0], total, counter[1], "")
 
         submitted = 0
         for path_str in regular:
@@ -326,7 +326,7 @@ class HashingEngine(QThread):
                         cur, cache_hits = counter[0], counter[1]
                     # Write progress snapshot; drain timer emits at most once per tick.
                     with self._progress_lock:
-                        self._pending_progress = (cur, total, cache_hits)
+                        self._pending_progress = (cur, total, cache_hits, p)
                     # Push result onto queue; drain timer emits file_hashed in batch.
                     self._result_queue.put((p, hash_val or "", ft or "", lang or ""))
                     semaphore.release()

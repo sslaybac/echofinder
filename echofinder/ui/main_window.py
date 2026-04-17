@@ -371,19 +371,24 @@ class MainWindow(QMainWindow):
         self.statusBar().addWidget(self._progress_bar)
         self.statusBar().addWidget(self._progress_label)
 
-    def _on_progress_updated(self, current: int, total: int, from_cache: int) -> None:
+    def _on_progress_updated(self, current: int, total: int, from_cache: int, filename: str) -> None:
         """Update the progress bar value and label text.
 
         Args:
             current: Number of files processed so far.
             total: Total number of files.
             from_cache: Number of files whose hash came from the cache.
+            filename: Path of the most recently completed file.
         """
         if self._progress_bar is not None:
             self._progress_bar.setValue(current)
         if self._progress_label is not None:
+            name = os.path.basename(filename) if filename else ""
+            if len(name) > 30:
+                name = name[:29] + "\u2026"
+            suffix = f"  \u2014  {name}" if name else ""
             self._progress_label.setText(
-                f"Hashing\u2026 {current:,} / {total:,} ({from_cache:,} from cache)"
+                f"Hashing\u2026 {current:,} / {total:,} ({from_cache:,} from cache){suffix}"
             )
 
     def _on_hashing_complete(self) -> None:
