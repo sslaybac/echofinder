@@ -251,6 +251,8 @@ class HashingEngine(QThread):
         self._cancelled = False
         self._drain_cycles = 0
         self._peak_batch = 0
+        with self._progress_lock:
+            self._pending_progress = None
         self.start()
 
     def cancel(self) -> None:

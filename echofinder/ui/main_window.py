@@ -291,7 +291,8 @@ class MainWindow(QMainWindow):
         # Cancel any in-progress hashing before switching roots
         if self._hashing_engine.isRunning():
             self._hashing_engine.cancel()
-            self._hashing_engine.wait(5000)
+            self._hashing_engine.wait()
+        self._remove_progress_widgets()
 
         # Disconnect old model's signals before discarding it
         if self._tree_model is not None:
