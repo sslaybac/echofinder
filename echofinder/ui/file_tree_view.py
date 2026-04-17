@@ -12,8 +12,11 @@ New in Stage 6:
 
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from PyQt6.QtCore import (
     QAbstractItemModel,
@@ -342,6 +345,7 @@ class RenameDelegate(NodeIndicatorDelegate):
             collision = new_name in collision_names
 
         if collision:
+            logger.warning("rename conflict: %s → %s already exists in %s", old_path.name, new_name, parent_dir)
             try:
                 QApplication.beep()
             except Exception:
@@ -357,6 +361,7 @@ class RenameDelegate(NodeIndicatorDelegate):
 
         # No collision: perform the rename via business logic layer
         new_path = parent_dir / new_name
+        logger.info("rename: %s → %s", old_path, new_path)
         rename_result = rename_item(old_path, new_path)
         if not rename_result.success:
             _error_dialog(
@@ -808,8 +813,10 @@ class FileTreeView(QTreeView):
         ):
             return
 
+        logger.info("delete: %s", node.path)
         result = delete_item(node.path)
         if not result.success:
+            logger.warning("delete failed: %s — %s", node.path, result.error_msg)
             _error_dialog(self, "Delete Failed", result.error_msg or "Could not delete the item.")
             return
 
@@ -870,6 +877,7 @@ class FileTreeView(QTreeView):
     # ------------------------------------------------------------------
 
     def _do_move(self, src: Path, dst_parent: Path) -> None:
+        logger.info("move: %s → %s", src, dst_parent)
         """Execute ``move_item`` for *src* → *dst_parent* and handle any errors.
 
         Args:
@@ -1147,6 +1155,7 @@ class FileTreeView(QTreeView):
             return
 
         src_path = Path(mime.data(_DRAG_MIME_TYPE).data().decode("utf-8"))
+        logger.debug("drop: src=%s", src_path)
 
         pos = event.position().toPoint()
         dst_index = self.indexAt(pos)
@@ -1184,6 +1193,7 @@ class FileTreeView(QTreeView):
         if not index.isValid():
             return
         node: FileNode = index.internalPointer()
+        logger.debug("movement mode: enter for %s", node.path)
         self._movement_mode = True
         self._move_source_persistent = QPersistentModelIndex(index)
         self._move_source_was_expanded = node.is_dir and self.isExpanded(index)
@@ -1238,6 +1248,7 @@ class FileTreeView(QTreeView):
 
     def _cancel_movement(self) -> None:
         """Exit movement mode without committing; restore the original selection."""
+        logger.debug("movement mode: cancelled")
         self._movement_mode = False
         self._ghost_overlay.clear_ghost()
         self._rename_delegate.set_hidden_source(None)
@@ -1278,8 +1289,10 @@ class FileTreeView(QTreeView):
 
         # Same location? no-op
         if dst_parent == src_node.path.parent:
+            logger.debug("movement mode: committed to same parent, no-op")
             return
 
+        logger.info("movement mode: committed %s → %s", src_node.path, dst_parent)
         self._do_move(src_node.path, dst_parent)
 
     def _move_ghost_step(self, direction: int) -> None:

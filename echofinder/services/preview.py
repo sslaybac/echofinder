@@ -5,7 +5,10 @@ pre-loaded data only; they never open files themselves.
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 def read_text_for_preview(path: Path) -> tuple[str, str]:
@@ -22,10 +25,13 @@ def read_text_for_preview(path: Path) -> tuple[str, str]:
         OSError: if the file cannot be opened or read at all.
     """
     raw: bytes = path.read_bytes()
+    logger.debug("read_text_for_preview: %s (%d bytes)", path, len(raw))
 
     # Step 1: UTF-8
     try:
-        return raw.decode("utf-8"), "UTF-8"
+        text = raw.decode("utf-8")
+        logger.debug("read_text_for_preview: %s → UTF-8", path)
+        return text, "UTF-8"
     except UnicodeDecodeError:
         pass
 
@@ -46,13 +52,25 @@ def read_text_for_preview(path: Path) -> tuple[str, str]:
             if not is_multibyte_unicode:
                 try:
                     decoded = raw.decode(result.encoding)
+                    logger.debug(
+                        "read_text_for_preview: %s → %s (charset-normalizer)",
+                        path,
+                        result.encoding.upper(),
+                    )
                     return decoded, result.encoding.upper()
                 except (UnicodeDecodeError, LookupError):
-                    pass
+                    logger.warning(
+                        "read_text_for_preview: %s — charset-normalizer suggested %s but decode failed",
+                        path,
+                        result.encoding,
+                    )
+        else:
+            logger.debug("read_text_for_preview: %s — charset-normalizer found no result", path)
     except ImportError:
-        pass
+        logger.debug("read_text_for_preview: charset-normalizer not available, skipping step 2")
 
     # Step 3: Latin-1 — always produces a displayable result
+    logger.debug("read_text_for_preview: %s → Latin-1 (fallback)", path)
     return raw.decode("latin-1"), "Latin-1"
 
 

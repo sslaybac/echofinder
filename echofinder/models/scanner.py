@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from collections.abc import Iterator
@@ -13,6 +14,8 @@ from echofinder.models.file_node import (
     PermissionState,
 )
 from echofinder.services.file_type import FileTypeResolver
+
+logger = logging.getLogger(__name__)
 
 # Cache current user's UID and supplemental GIDs at import time.
 # These are stable for the lifetime of the process on any normal Unix system.
@@ -95,19 +98,25 @@ def scan_directory(
     Ownership and permission for each child are evaluated here so that slot-2
     and slot-3 indicators are available immediately when the node is displayed.
     """
+    logger.debug("scan_directory: %s", node.path)
     try:
         entries = sorted(
             node.path.iterdir(),
             key=lambda e: (e.is_symlink() or not e.is_dir(), e.name.lower()),
         )
-    except (PermissionError, OSError):
+    except PermissionError:
+        logger.warning("scan_directory: permission denied: %s", node.path)
+        return []
+    except OSError as exc:
+        logger.warning("scan_directory: OS error listing %s: %s", node.path, exc)
         return []
 
     children: list[FileNode] = []
     for i, entry in enumerate(entries):
         try:
             file_type = resolver.resolve_fast(entry, root)
-        except Exception:
+        except Exception as exc:
+            logger.warning("scan_directory: file_type resolution failed for %s: %s", entry, exc)
             file_type = FileType.UNKNOWN
 
         # Evaluate ownership (requires stat)
@@ -115,15 +124,15 @@ def scan_directory(
         try:
             stat_result = entry.stat(follow_symlinks=False)
             ownership = _evaluate_ownership(stat_result)
-        except OSError:
-            pass
+        except OSError as exc:
+            logger.warning("scan_directory: stat failed for %s: %s", entry, exc)
 
         # Evaluate permissions (uses os.access)
         permission = PermissionState.NOT_READABLE  # safe fallback
         try:
             permission = _evaluate_permission(entry)
-        except OSError:
-            pass
+        except OSError as exc:
+            logger.warning("scan_directory: permission check failed for %s: %s", entry, exc)
 
         hash_state = _initial_hash_state(file_type, permission)
 
@@ -139,4 +148,5 @@ def scan_directory(
             )
         )
 
+    logger.debug("scan_directory: %s → %d children", node.path, len(children))
     return children

@@ -17,7 +17,10 @@ its mutual exclusivity logic is enforced; Stage 6 activates it via
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from PyQt6.QtCore import QAbstractItemModel, QModelIndex, Qt, pyqtSlot
 from PyQt6.QtGui import QIcon
@@ -94,6 +97,7 @@ class FileTreeModel(QAbstractItemModel):
             path: Absolute ``Path`` to the directory that will become the
                 tree root.
         """
+        logger.info("set_root: %s", path)
         self.beginResetModel()
         self._root = FileNode(path=path, file_type=FileType.FOLDER)
         # Clear all per-root state
@@ -238,6 +242,7 @@ class FileTreeModel(QAbstractItemModel):
         # every previously UNIQUE node with the same hash must become DUPLICATE_GENERAL
         # (or DUPLICATE_SPECIFIC if appropriate).
         if prev_group_size == 1:
+            logger.debug("on_file_hashed: new duplicate group (hash=%s…, size=2)", hash_val[:8])
             for other_path in group:
                 if other_path == path:
                     continue
@@ -375,6 +380,7 @@ class FileTreeModel(QAbstractItemModel):
             return
 
         children = self._scan_children(node)
+        logger.debug("fetchMore: %s → %d children", node.path, len(children))
         if children:
             self.beginInsertRows(parent, 0, len(children) - 1)
             node.children = children
@@ -492,6 +498,7 @@ class FileTreeModel(QAbstractItemModel):
             # Hash already arrived before this node was loaded — apply correct state
             correct_state = self._compute_hash_state(path_str, known_hash)
             node.hash_state = correct_state
+            logger.debug("_register_node: applied pre-existing hash state %s to %s", correct_state.name, node.path)
             # No dataChanged emit here — node just became visible with the right state
 
     def _compute_hash_state(self, path: str, hash_val: str) -> HashState:
@@ -521,6 +528,7 @@ class FileTreeModel(QAbstractItemModel):
     # ------------------------------------------------------------------
 
     def refresh_dir(self, dir_path: Path) -> None:
+        logger.debug("refresh_dir: %s", dir_path)
         """Reload the children of *dir_path*, discarding stale nodes.
 
         Called after deletion, rename, or move so the tree reflects the new

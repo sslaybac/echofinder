@@ -1,7 +1,10 @@
 import json
+import logging
 from pathlib import Path
 
 import platformdirs
+
+logger = logging.getLogger(__name__)
 
 
 class SessionState:
@@ -23,26 +26,37 @@ class SessionState:
         config_dir = Path(platformdirs.user_config_dir(self._APP_NAME))
         config_dir.mkdir(parents=True, exist_ok=True)
         self._config_path = config_dir / self._CONFIG_FILE
+        logger.debug("session config: %s", self._config_path)
         self._data: dict = self._load()
 
     def _load(self) -> dict:
         """Read and return the JSON session file, or ``{}`` on any error."""
-        if self._config_path.exists():
-            try:
-                with open(self._config_path) as f:
-                    data = json.load(f)
-                    return data if isinstance(data, dict) else {}
-            except (json.JSONDecodeError, OSError):
+        if not self._config_path.exists():
+            logger.debug("session file not found, starting empty")
+            return {}
+        try:
+            with open(self._config_path) as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                logger.warning("session file has unexpected type %s, discarding", type(data).__name__)
                 return {}
-        return {}
+            logger.debug("session loaded: root=%r, %d expanded paths", data.get("root"), len(data.get("expanded_paths", [])))
+            return data
+        except json.JSONDecodeError as exc:
+            logger.warning("session file corrupt (JSON error: %s), starting empty", exc)
+            return {}
+        except OSError as exc:
+            logger.warning("session file unreadable (%s), starting empty", exc)
+            return {}
 
     def _save(self) -> None:
         """Persist ``_data`` to disk; silently ignores write errors."""
         try:
             with open(self._config_path, "w") as f:
                 json.dump(self._data, f, indent=2)
-        except OSError:
-            pass
+            logger.debug("session saved: %s", self._config_path)
+        except OSError as exc:
+            logger.warning("session save failed: %s", exc)
 
     def get_root(self) -> str | None:
         """Return the last saved root directory path, or ``None`` if unset.

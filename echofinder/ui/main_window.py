@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from PyQt6.QtCore import QModelIndex, Qt
 from PyQt6.QtWidgets import (
@@ -154,6 +157,7 @@ class MainWindow(QMainWindow):
 
     def _on_entries_removed(self, paths: list) -> None:
         """Remove paths from the tree and hash cache after polling detects deletion."""
+        logger.debug("polling: %d path(s) removed", len(paths))
         if self._tree_model is None:
             return
         # Snapshot selection and expansion before refresh_dir removes rows.
@@ -174,6 +178,7 @@ class MainWindow(QMainWindow):
 
     def _on_entries_added(self, paths: list) -> None:
         """Refresh affected directories and queue new files for hashing."""
+        logger.debug("polling: %d path(s) added", len(paths))
         if self._tree_model is None:
             return
         # Snapshot selection and expansion before refresh_dir removes rows.
@@ -206,6 +211,7 @@ class MainWindow(QMainWindow):
 
     def _on_entries_changed(self, paths: list) -> None:
         """Reset hash state for changed files and queue them for re-hashing."""
+        logger.debug("polling: %d path(s) changed", len(paths))
         if self._tree_model is None:
             return
         self._tree_model.on_entries_changed(paths)
@@ -252,8 +258,12 @@ class MainWindow(QMainWindow):
         if root_str:
             root = Path(root_str)
             if root.is_dir():
+                logger.info("session restore: root=%s", root)
                 self._set_root(root, restore_expansion=True)
                 return
+            logger.warning("session restore: saved root no longer exists: %s", root_str)
+        else:
+            logger.debug("session restore: no saved root")
         self._preview_pane.show_empty()
 
     # ------------------------------------------------------------------
@@ -288,8 +298,10 @@ class MainWindow(QMainWindow):
         # the thread permanently; start_polling() uses _wake.set() to abort any
         # in-progress cycle and reset the interval, which is all we need.
 
+        logger.info("set_root: %s (restore_expansion=%s)", path, restore_expansion)
         # Cancel any in-progress hashing before switching roots
         if self._hashing_engine.isRunning():
+            logger.debug("set_root: cancelling in-flight hashing")
             self._hashing_engine.cancel()
             self._hashing_engine.wait()
         self._remove_progress_widgets()
@@ -356,6 +368,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_hashing_started(self, total: int) -> None:
+        logger.debug("hashing started: %d files", total)
         """Add progress bar and label to the status bar when hashing begins.
 
         Args:
@@ -394,10 +407,12 @@ class MainWindow(QMainWindow):
 
     def _on_hashing_complete(self) -> None:
         """Remove progress widgets from the status bar when hashing finishes."""
+        logger.debug("hashing complete")
         self._remove_progress_widgets()
 
     def _on_hashing_cancelled(self) -> None:
         """Remove progress widgets from the status bar when hashing is cancelled."""
+        logger.debug("hashing cancelled")
         self._remove_progress_widgets()
 
     def _remove_progress_widgets(self) -> None:
@@ -529,6 +544,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         """Stop background threads and close the hash cache on application exit."""
+        logger.info("shutdown: stopping engines")
         # Stop the polling engine first so no signals fire after shutdown.
         if self._polling_engine.isRunning():
             self._polling_engine.stop()
@@ -537,4 +553,5 @@ class MainWindow(QMainWindow):
             self._hashing_engine.cancel()
             self._hashing_engine.wait()
         self._hash_cache.close()
+        logger.info("shutdown: complete")
         super().closeEvent(event)
