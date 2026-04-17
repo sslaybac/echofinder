@@ -202,8 +202,22 @@ class FileTreeModel(QAbstractItemModel):
     # ------------------------------------------------------------------
 
     @pyqtSlot(str, str, str, str)
-    def on_file_hashed(self, path: str, hash_val: str, _ft: str, _lang: str) -> None:
+    def on_file_hashed(self, path: str, hash_val: str, ft: str, _lang: str) -> None:
         """Update duplicate tracking and node slot-4 state when a hash arrives."""
+        # Promote file_type from extension guess to MIME-detected type when magic
+        # resolves to a concrete binary type (IMAGE/VIDEO/AUDIO/PDF).  UNKNOWN is
+        # returned for text/* and application/* — those are already handled by the
+        # extension fallback and should not overwrite a good extension-based guess.
+        if ft:
+            promoted = FileTypeResolver.mime_to_file_type(ft)
+            if promoted != FileType.UNKNOWN:
+                node = self._path_to_node.get(path)
+                if node is not None and node.file_type != promoted:
+                    node.file_type = promoted
+                    idx = self._model_index_for_node(node)
+                    if idx.isValid():
+                        self.dataChanged.emit(idx, idx, [Qt.ItemDataRole.DecorationRole])
+
         # Record the hash
         self._path_to_hash[path] = hash_val
         group = self._hash_to_paths.setdefault(hash_val, set())

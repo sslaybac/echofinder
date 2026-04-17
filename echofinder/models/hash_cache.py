@@ -100,18 +100,18 @@ class HashCache:
         """
         return self._was_reset
 
-    def lookup(self, path: str, size: int, mtime: float) -> str | None:
-        """Return cached hash if path, size, and mtime all match; else None."""
+    def lookup(self, path: str, size: int, mtime: float) -> tuple[str, str | None] | None:
+        """Return (hash, filetype) if path, size, and mtime all match; else None."""
         try:
             with self._lock:
                 cur = self._conn.execute(
-                    "SELECT hash FROM files WHERE path=? AND size=? AND mtime=?",
+                    "SELECT hash, filetype FROM files WHERE path=? AND size=? AND mtime=?",
                     (path, size, mtime),
                 )
                 row = cur.fetchone()
             if row:
                 logger.debug("Cache hit: %s", path)
-            return row[0] if row else None
+            return (row[0], row[1]) if row else None
         except (sqlite3.DatabaseError, sqlite3.OperationalError):
             logger.exception("Cache read error for %s", path)
             return None

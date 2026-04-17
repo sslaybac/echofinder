@@ -62,6 +62,27 @@ class FileTypeResolver:
     stateless and safe to call from any thread.
     """
 
+    def resolve_fast(self, path: Path, root: Path | None = None) -> FileType:
+        """Classify *path* using only stat calls and file extension — no magic read.
+
+        Used by ``scan_directory`` so that directory expansion never blocks the
+        main thread on disk I/O.  The returned type may be ``UNKNOWN`` for files
+        whose extension is unrecognised; the hashing engine will emit the
+        MIME-detected type later via ``file_hashed``, and the tree model will
+        promote the node at that point.
+        """
+        if path.is_symlink():
+            result = self._resolve_symlink(path, root)
+            logger.debug("Resolved (fast) %s → %s (symlink)", path, result)
+            return result
+        if path.is_dir():
+            return FileType.FOLDER
+        if not path.is_file():
+            return FileType.UNKNOWN
+        result = self._ext_to_type(path.suffix.lower())
+        logger.debug("Resolved (fast) %s → %s (extension only)", path, result)
+        return result
+
     def resolve(self, path: Path, root: Path | None = None) -> FileType:
         """Classify *path* as a ``FileType``.
 
@@ -128,7 +149,8 @@ class FileTypeResolver:
             pass
         return FileType.SYMLINK_EXTERNAL
 
-    def _mime_to_type(self, mime: str) -> FileType:
+    @staticmethod
+    def mime_to_file_type(mime: str) -> FileType:
         """Map a MIME type string to a ``FileType``.
 
         Text and code subtypes are not distinguished here; the caller
@@ -150,6 +172,9 @@ class FileTypeResolver:
             return FileType.PDF
         # text/* and application/* code types — defer to extension for text/code split
         return FileType.UNKNOWN
+
+    # Keep the private alias so existing internal call sites are unaffected.
+    _mime_to_type = mime_to_file_type
 
     def _ext_to_type(self, ext: str) -> FileType:
         """Map a lowercase file extension (including the dot) to a ``FileType``.

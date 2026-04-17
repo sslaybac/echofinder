@@ -69,7 +69,8 @@ def test_lookup_miss_on_empty_cache(cache: HashCache) -> None:
 
 def test_lookup_hit_after_store(cache: HashCache) -> None:
     cache.store("/a/b.txt", 42, 1.0, "abc123", "text/plain", None)
-    assert cache.lookup("/a/b.txt", 42, 1.0) == "abc123"
+    result = cache.lookup("/a/b.txt", 42, 1.0)
+    assert result is not None and result[0] == "abc123"
 
 
 def test_lookup_miss_wrong_size(cache: HashCache) -> None:
@@ -95,7 +96,8 @@ def test_lookup_miss_wrong_path(cache: HashCache) -> None:
 def test_store_replaces_existing_entry(cache: HashCache) -> None:
     cache.store("/f.txt", 10, 1.0, "oldhash", "text/plain", None)
     cache.store("/f.txt", 10, 1.0, "newhash", "text/plain", None)
-    assert cache.lookup("/f.txt", 10, 1.0) == "newhash"
+    result = cache.lookup("/f.txt", 10, 1.0)
+    assert result is not None and result[0] == "newhash"
 
 
 def test_store_preserves_filetype_and_language(cache: HashCache) -> None:
@@ -188,7 +190,8 @@ def test_update_path_moves_entry(cache: HashCache) -> None:
     cache.store("/old.txt", 10, 1.0, "myhash", None, None)
     cache.update_path("/old.txt", "/new.txt")
     assert cache.lookup("/old.txt", 10, 1.0) is None
-    assert cache.lookup("/new.txt", 10, 1.0) == "myhash"
+    result = cache.lookup("/new.txt", 10, 1.0)
+    assert result is not None and result[0] == "myhash"
 
 
 def test_update_path_preserves_metadata(cache: HashCache) -> None:
@@ -222,7 +225,8 @@ def test_remove_path_does_not_affect_other_entries(cache: HashCache) -> None:
     cache.store("/keep.txt", 1, 1.0, "keep", None, None)
     cache.store("/drop.txt", 2, 2.0, "drop", None, None)
     cache.remove_path("/drop.txt")
-    assert cache.lookup("/keep.txt", 1, 1.0) == "keep"
+    result = cache.lookup("/keep.txt", 1, 1.0)
+    assert result is not None and result[0] == "keep"
 
 
 # ---------------------------------------------------------------------------
@@ -277,7 +281,7 @@ def test_concurrent_stores_and_lookups(cache: HashCache) -> None:
             h = f"hash{index}"
             cache.store(path, index, float(index), h, None, None)
             result = cache.lookup(path, index, float(index))
-            assert result == h
+            assert result is not None and result[0] == h
         except Exception as exc:  # noqa: BLE001
             errors.append(exc)
 

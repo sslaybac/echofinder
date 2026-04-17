@@ -106,7 +106,7 @@ def scan_directory(
     children: list[FileNode] = []
     for i, entry in enumerate(entries):
         try:
-            file_type = resolver.resolve(entry, root)
+            file_type = resolver.resolve_fast(entry, root)
         except Exception:
             file_type = FileType.UNKNOWN
 

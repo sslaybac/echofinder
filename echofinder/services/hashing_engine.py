@@ -3,15 +3,26 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import queue as _queue
 import threading
 from pathlib import Path
 
-from PyQt6.QtCore import QRunnable, QThread, QThreadPool, pyqtSignal
+from PyQt6.QtCore import QRunnable, QThread, QThreadPool, QTimer, pyqtSignal
 
 from echofinder.models.hash_cache import HashCache
 from echofinder.models.scanner import walk_files
 
 logger = logging.getLogger(__name__)
+
+# Drain timer interval: how often the main thread processes queued hash results.
+_DRAIN_INTERVAL_MS = 100
+# Log a warning when a single drain tick finds more than this many queued items.
+_BACKLOG_WARN_THRESHOLD = 1000
+
+# Sentinels pushed onto the result queue to signal end-of-run state.
+# Always compare with `is`, never `==`.
+_SENTINEL_COMPLETE = object()
+_SENTINEL_CANCELLED = object()
 
 
 # ---------------------------------------------------------------------------
@@ -149,9 +160,10 @@ class _HashTask(QRunnable):
         size = stat.st_size
         mtime = stat.st_mtime
 
-        cached_hash = self._cache.lookup(path, size, mtime)
-        if cached_hash is not None:
-            self._on_done(True, cached_hash, None, None)
+        cached = self._cache.lookup(path, size, mtime)
+        if cached is not None:
+            cached_hash, cached_filetype = cached
+            self._on_done(True, cached_hash, cached_filetype, None)
             return
 
         try:
@@ -201,10 +213,36 @@ class HashingEngine(QThread):
         self._cancelled = False
         self._lock = threading.Lock()
 
+        # Pool thread callbacks push (path, hash, ft, lang) tuples or sentinel
+        # objects here instead of emitting signals directly.  The drain timer
+        # processes the queue on the main thread every _DRAIN_INTERVAL_MS ms,
+        # collapsing thousands of per-file signal emissions into at most ~10/s.
+        self._result_queue: _queue.SimpleQueue = _queue.SimpleQueue()
+
+        # Latest progress snapshot written by pool callbacks under _progress_lock;
+        # read and cleared by _drain_results().  None means no update pending.
+        self._pending_progress: tuple[int, int, int] | None = None
+        self._progress_lock = threading.Lock()
+
+        # Per-run diagnostics reset in start_hashing().
+        self._drain_cycles = 0
+        self._peak_batch = 0
+
+        # QThread objects are owned by their creator thread (main thread here),
+        # so this timer fires on the main thread even though HashingEngine is a
+        # QThread.  It runs continuously; _drain_results() is a no-op on an
+        # empty queue so the idle overhead is negligible.
+        self._drain_timer = QTimer(self)
+        self._drain_timer.setInterval(_DRAIN_INTERVAL_MS)
+        self._drain_timer.timeout.connect(self._drain_results)
+        self._drain_timer.start()
+
     def start_hashing(self, root: Path) -> None:
         """Set the root and start the background thread."""
         self._root = root
         self._cancelled = False
+        self._drain_cycles = 0
+        self._peak_batch = 0
         self.start()
 
     def cancel(self) -> None:
@@ -222,7 +260,7 @@ class HashingEngine(QThread):
         """
         root = self._root
         if root is None:
-            self.hashing_complete.emit()
+            self._result_queue.put(_SENTINEL_COMPLETE)
             return
 
         # Walk on this background thread so the main thread is never blocked
@@ -245,12 +283,12 @@ class HashingEngine(QThread):
 
         if total == 0:
             logger.info("Hashing run completed: 0 files to process")
-            self.hashing_complete.emit()
+            self._result_queue.put(_SENTINEL_COMPLETE)
             return
 
         if self._cancelled:
             logger.info("Hashing run cancelled before submission (root changed)")
-            self.hashing_cancelled.emit()
+            self._result_queue.put(_SENTINEL_CANCELLED)
             return
 
         # Prune stale cache entries for this root before hashing begins
@@ -259,11 +297,13 @@ class HashingEngine(QThread):
         pool = QThreadPool.globalInstance()
         pool.setMaxThreadCount(max(1, (os.cpu_count() or 2) - 1))
 
-        # Symlinks are pre-counted: they advance current without producing a hash
+        # Symlinks are pre-counted: they advance current without producing a hash.
+        # Seed pending_progress so the first drain tick shows the symlink offset.
         counter = [len(symlinks), 0]  # [current, from_cache]
         semaphore = threading.Semaphore(0)
 
-        self.progress_updated.emit(counter[0], total, counter[1])
+        with self._progress_lock:
+            self._pending_progress = (counter[0], total, counter[1])
 
         submitted = 0
         for path_str in regular:
@@ -284,9 +324,11 @@ class HashingEngine(QThread):
                         if is_cache_hit:
                             counter[1] += 1
                         cur, cache_hits = counter[0], counter[1]
-                    self.progress_updated.emit(cur, total, cache_hits)
-                    if hash_val:
-                        self.file_hashed.emit(p, hash_val, ft or "", lang or "")
+                    # Write progress snapshot; drain timer emits at most once per tick.
+                    with self._progress_lock:
+                        self._pending_progress = (cur, total, cache_hits)
+                    # Push result onto queue; drain timer emits file_hashed in batch.
+                    self._result_queue.put((p, hash_val or "", ft or "", lang or ""))
                     semaphore.release()
                 return on_done
 
@@ -304,7 +346,7 @@ class HashingEngine(QThread):
 
         if self._cancelled:
             logger.info("Hashing run cancelled (root changed mid-run)")
-            self.hashing_cancelled.emit()
+            self._result_queue.put(_SENTINEL_CANCELLED)
         else:
             cache_hits = counter[1]
             actively_hashed = submitted - cache_hits
@@ -312,7 +354,65 @@ class HashingEngine(QThread):
                 "Hashing run completed: processed=%d, cache_hits=%d, hashed=%d",
                 counter[0], cache_hits, actively_hashed,
             )
+            self._result_queue.put(_SENTINEL_COMPLETE)
+
+    def _drain_results(self) -> None:
+        """Drain the result queue and emit signals on the main thread.
+
+        Called by the drain timer every _DRAIN_INTERVAL_MS.  Processes all
+        items queued since the last tick in one batch, emits file_hashed for
+        each result with a valid hash, emits at most one progress_updated, then
+        emits the terminal signal (hashing_complete or hashing_cancelled) after
+        all results are delivered.
+        """
+        batch = []
+        while True:
+            try:
+                batch.append(self._result_queue.get_nowait())
+            except _queue.Empty:
+                break
+
+        n = len(batch)
+        if n == 0:
+            return
+
+        self._drain_cycles += 1
+        if n > self._peak_batch:
+            self._peak_batch = n
+
+        if n > _BACKLOG_WARN_THRESHOLD:
+            logger.warning(
+                "Result queue backlog: %d items pending — consider reducing drain interval", n
+            )
+        else:
+            logger.debug("Drained %d result(s) in tick %d", n, self._drain_cycles)
+
+        terminal = None
+        for item in batch:
+            if item is _SENTINEL_COMPLETE or item is _SENTINEL_CANCELLED:
+                terminal = item
+                continue
+            path, hash_val, ft, lang = item
+            if hash_val:
+                self.file_hashed.emit(path, hash_val, ft, lang)
+
+        # Emit at most one progress update per drain tick (last known state)
+        with self._progress_lock:
+            prog = self._pending_progress
+            self._pending_progress = None
+        if prog is not None:
+            self.progress_updated.emit(*prog)
+
+        # Terminal signal is emitted after all results and progress so that
+        # connected slots (e.g. removing the progress bar) see a fully updated state.
+        if terminal is _SENTINEL_COMPLETE:
+            logger.info(
+                "Hashing complete signal delivered: drain_cycles=%d, peak_batch=%d",
+                self._drain_cycles, self._peak_batch,
+            )
             self.hashing_complete.emit()
+        elif terminal is _SENTINEL_CANCELLED:
+            self.hashing_cancelled.emit()
 
     def rehash_paths(self, paths: list[str]) -> None:
         """Submit specific files for re-hashing via the global thread pool.
@@ -320,7 +420,8 @@ class HashingEngine(QThread):
         Used by the polling engine after it detects that a file's size or mtime
         has changed since it was last hashed.  Each file is submitted as an
         independent task; progress tracking is not updated (these are minor
-        incremental re-hashes, not a full scan).
+        incremental re-hashes, not a full scan).  Results are queued and
+        delivered via the same drain timer as the bulk hashing run.
         """
         pool = QThreadPool.globalInstance()
         for path_str in paths:
@@ -331,8 +432,7 @@ class HashingEngine(QThread):
                     ft: str | None,
                     lang: str | None,
                 ) -> None:
-                    if hash_val:
-                        self.file_hashed.emit(p, hash_val, ft or "", lang or "")
+                    self._result_queue.put((p, hash_val or "", ft or "", lang or ""))
                 return on_done
 
             task = _HashTask(
