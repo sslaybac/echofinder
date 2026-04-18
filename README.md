@@ -33,6 +33,7 @@ instantly.
   - Folder contents are shown as a navigable list.
   - Symlinks show their target path with a navigation link.
   - PDF files are rendered inline with multi-page scroll and zoom support.
+  - EPUB files are rendered inline with chapter navigation and zoom support.
   - Audio files are played back inline with play/pause, stop, seek, and
     volume controls. VLC must be installed on the host system.
   - Video files are played back inline with the same controls as audio.
@@ -55,22 +56,23 @@ instantly.
 
 ## Technology Stack
 
-| Concern                  | Library / Tool           | Notes                                      |
-|--------------------------|--------------------------|--------------------------------------------|
-| GUI framework            | PyQt6                    | Widgets, signals/slots, threading          |
-| File hashing             | hashlib (stdlib)         | SHA-256                                    |
-| Hash / metadata cache    | sqlite3 (stdlib)         | Persistent across sessions                 |
-| Filesystem polling       | os (stdlib)              | os.stat, os.walk                           |
-| Trash / deletion         | send2trash               | Cross-platform recycle bin support         |
-| Image preview            | Pillow                   | JPEG, PNG, GIF, TIFF, BMP, WebP            |
-| File type detection      | python-magic             | MIME type via libmagic                     |
-| PDF rendering            | PyMuPDF (fitz)           | Multi-page preview with zoom               |
-| Audio playback           | python-vlc               | Wraps libvlc; VLC must be installed        |
-| Video playback           | PyQt6.QtMultimedia       | FFmpeg backend; no additional install      |
-| Syntax highlighting      | Pygments                 | 500+ languages                             |
-| Encoding detection       | charset-normalizer       | Automatic detection for non-UTF-8 text     |
-| Config file paths        | platformdirs             | OS-appropriate locations                   |
-| Package management       | uv                       |                                            |
+| Concern                  | Library / Tool             | Notes                                      |
+|--------------------------|----------------------------|--------------------------------------------|
+| GUI framework            | PyQt6                      | Widgets, signals/slots, threading          |
+| File hashing             | hashlib (stdlib)           | SHA-256                                    |
+| Hash / metadata cache    | sqlite3 (stdlib)           | Persistent across sessions                 |
+| Filesystem polling       | os (stdlib)                | os.stat, os.walk                           |
+| Trash / deletion         | send2trash                 | Cross-platform recycle bin support         |
+| Image preview            | Pillow                     | JPEG, PNG, GIF, TIFF, BMP, WebP            |
+| File type detection      | python-magic               | MIME type via libmagic                     |
+| PDF rendering            | PyMuPDF (fitz)             | Multi-page preview with zoom               |
+| EPUB rendering           | ebooklib + PyQt6-WebEngine | Chapter navigation, zoom, asset serving    |
+| Audio playback           | python-vlc                 | Wraps libvlc; VLC must be installed        |
+| Video playback           | PyQt6.QtMultimedia         | FFmpeg backend; no additional install      |
+| Syntax highlighting      | Pygments                   | 500+ languages                             |
+| Encoding detection       | charset-normalizer         | Automatic detection for non-UTF-8 text     |
+| Config file paths        | platformdirs               | OS-appropriate locations                   |
+| Package management       | uv                         |                                            |
 
 ---
 
