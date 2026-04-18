@@ -51,6 +51,7 @@ class HashCache:
         db_dir.mkdir(parents=True, exist_ok=True)
         self._db_path = db_dir / self._DB_FILE
         self._was_reset = False
+        self._closed = False
         self._lock = threading.Lock()
         self._conn = self._open_connection()
 
@@ -104,6 +105,8 @@ class HashCache:
         """Return (hash, filetype) if path, size, and mtime all match; else None."""
         try:
             with self._lock:
+                if self._closed:
+                    return None
                 cur = self._conn.execute(
                     "SELECT hash, filetype FROM files WHERE path=? AND size=? AND mtime=?",
                     (path, size, mtime),
@@ -112,7 +115,7 @@ class HashCache:
             if row:
                 logger.debug("Cache hit: %s", path)
             return (row[0], row[1]) if row else None
-        except (sqlite3.DatabaseError, sqlite3.OperationalError):
+        except (sqlite3.DatabaseError, sqlite3.OperationalError, sqlite3.ProgrammingError):
             logger.exception("Cache read error for %s", path)
             return None
 
@@ -128,6 +131,8 @@ class HashCache:
         """Insert or replace a cache entry."""
         try:
             with self._lock:
+                if self._closed:
+                    return
                 self._conn.execute(
                     "INSERT OR REPLACE INTO files "
                     "(path, size, mtime, hash, filetype, language) "
@@ -136,7 +141,7 @@ class HashCache:
                 )
                 self._conn.commit()
             logger.debug("Cache write: %s", path)
-        except (sqlite3.DatabaseError, sqlite3.OperationalError):
+        except (sqlite3.DatabaseError, sqlite3.OperationalError, sqlite3.ProgrammingError):
             logger.exception("Cache write error for %s", path)
 
     def prune(self, root: str) -> None:
@@ -145,6 +150,8 @@ class HashCache:
         root_prefix = root.rstrip("/\\") + os.sep
         try:
             with self._lock:
+                if self._closed:
+                    return
                 cur = self._conn.execute(
                     "SELECT path FROM files WHERE path LIKE ?",
                     (root_prefix + "%",),
@@ -153,13 +160,15 @@ class HashCache:
             missing = [p for p in candidates if not os.path.exists(p)]
             if missing:
                 with self._lock:
+                    if self._closed:
+                        return
                     self._conn.executemany(
                         "DELETE FROM files WHERE path=?",
                         [(p,) for p in missing],
                     )
                     self._conn.commit()
             logger.info("Cache prune removed %d stale entries under %s", len(missing), root)
-        except (sqlite3.DatabaseError, sqlite3.OperationalError):
+        except (sqlite3.DatabaseError, sqlite3.OperationalError, sqlite3.ProgrammingError):
             logger.exception("Cache prune error for root %s", root)
 
     def get_file_metadata(self, path: str) -> dict | None:
@@ -197,12 +206,14 @@ class HashCache:
         logger.debug("Cache update_path: %s → %s", old_path, new_path)
         try:
             with self._lock:
+                if self._closed:
+                    return
                 self._conn.execute(
                     "UPDATE files SET path=? WHERE path=?",
                     (new_path, old_path),
                 )
                 self._conn.commit()
-        except (sqlite3.DatabaseError, sqlite3.OperationalError):
+        except (sqlite3.DatabaseError, sqlite3.OperationalError, sqlite3.ProgrammingError):
             logger.exception("Cache update_path error: %s → %s", old_path, new_path)
 
     def get_cached_stat(self, path: str) -> tuple[int, float] | None:
@@ -226,6 +237,8 @@ class HashCache:
         """Delete the cache entry for *path* (used when polling detects a removal)."""
         try:
             with self._lock:
+                if self._closed:
+                    return
                 self._conn.execute("DELETE FROM files WHERE path=?", (path,))
                 self._conn.commit()
         except sqlite3.Error:
@@ -233,8 +246,9 @@ class HashCache:
 
     def close(self) -> None:
         """Close the database connection; called on application shutdown."""
-        try:
-            with self._lock:
+        with self._lock:
+            self._closed = True
+            try:
                 self._conn.close()
-        except sqlite3.Error:
-            pass
+            except sqlite3.Error:
+                pass

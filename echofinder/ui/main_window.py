@@ -545,6 +545,9 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:
         """Stop background threads and close the hash cache on application exit."""
         logger.info("shutdown: stopping engines")
+        # Release VLC and web engine resources before stopping engines so that
+        # libvlc's atexit handler does not block on still-active threads.
+        self._preview_pane.shutdown()
         # Stop the polling engine first so no signals fire after shutdown.
         if self._polling_engine.isRunning():
             self._polling_engine.stop()
@@ -552,6 +555,7 @@ class MainWindow(QMainWindow):
         if self._hashing_engine.isRunning():
             self._hashing_engine.cancel()
             self._hashing_engine.wait()
+        self._hashing_engine.stop_drain_timer()
         self._hash_cache.close()
         logger.info("shutdown: complete")
         super().closeEvent(event)

@@ -109,6 +109,17 @@ class PreviewPane(QStackedWidget):
     # Public API
     # ------------------------------------------------------------------
 
+    def shutdown(self) -> None:
+        """Release all preview resources that can block process exit.
+
+        Called once from MainWindow.closeEvent before engines are stopped.
+        Explicitly tears down VLC (whose atexit handler blocks on its internal
+        threads if not released in the correct order) and navigates the EPUB
+        web view to about:blank so QtWebEngine can clean up its renderer.
+        """
+        self._audio.shutdown()
+        self._epub.release()
+
     def show_empty(self) -> None:
         """Show the empty state widget and release any held preview resources."""
         self._image.release()

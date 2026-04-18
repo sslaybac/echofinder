@@ -243,6 +243,35 @@ class AudioPreviewWidget(QWidget):
         self._duration_label.setText("0:00")
         self._play_btn.setText("Play")
 
+    def shutdown(self) -> None:
+        """Release VLC player and instance; call once during application exit.
+
+        libvlc registers an atexit handler that joins its internal threads.
+        If the instance is not explicitly released before Python's cleanup runs,
+        that join can block indefinitely. Release order must be: stop → media
+        release → player release → instance release.
+        """
+        self._timer.stop()
+        if self._player is not None:
+            try:
+                self._player.stop()
+            except Exception:
+                pass
+        self._media = None
+        if self._player is not None:
+            try:
+                self._player.release()
+            except Exception:
+                pass
+            self._player = None
+        if self._instance is not None:
+            try:
+                self._instance.release()
+            except Exception:
+                pass
+            self._instance = None
+        logger.debug("VLC instance released on shutdown")
+
     # ------------------------------------------------------------------
     # Slot handlers
     # ------------------------------------------------------------------

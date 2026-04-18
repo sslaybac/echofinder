@@ -259,6 +259,10 @@ class HashingEngine(QThread):
         """Signal cancellation; in-flight tasks finish, queued tasks skip hashing."""
         self._cancelled = True
 
+    def stop_drain_timer(self) -> None:
+        """Stop the drain timer; called during shutdown before the cache is closed."""
+        self._drain_timer.stop()
+
     def run(self) -> None:
         """QThread entry point: walk *root*, submit pool tasks, await completion.
 
