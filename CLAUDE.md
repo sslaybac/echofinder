@@ -18,7 +18,7 @@ logic in widgets.
 - `echofinder/ui/` — all PyQt6 widgets and UI components
 
 ## Implementation Status
-Eleven-stage plan. **Stages 1–10 are complete.** Stage 11 remains.
+Eleven-stage plan. **All stages complete.**
 
 | Stage | Title                        | Status    |
 |-------|------------------------------|-----------|
@@ -32,12 +32,11 @@ Eleven-stage plan. **Stages 1–10 are complete.** Stage 11 remains.
 | 8     | PDF Preview                  | Complete  |
 | 9     | Audio Playback               | Complete  |
 | 10    | Video Playback               | Complete  |
-| 11    | EPUB Preview                 | Remaining |
+| 11    | EPUB Preview                 | Complete  |
 
 Stage 11 was added after the Staging Plan v2 was written; the staging plan does not
-include it. The Stage 11 spec is in `planning/Echofinder_Stage11_Context.md` (local
-only — not in the repository); see the Stage 11 section below for implementation
-context.
+include it. The original spec is in `planning/Echofinder_Stage11_Context.md` (local
+only — not in the repository).
 
 Stages 9 and 10 use python-vlc. Stage 9 installed the dependency; Stage 10 reuses it.
 VLC must be installed on the host system. Embedding VLC video output in a Qt widget
@@ -188,45 +187,44 @@ Tree expansion state and root directory are persisted to disk and restored on la
 Image zoom, PDF scroll position, and PDF zoom are retained in memory for the session
 only and reset on relaunch. Media playback position resets on navigation.
 
-## Stage 11: EPUB Preview
-The full spec is in `planning/Echofinder_Stage11_Context.md` (local only — not in the
-repository). The section below is self-contained for implementation purposes.
+## Stage 11: EPUB Preview — Implementation Notes
+`ui/preview/epub_widget.py` — `EpubPreviewWidget` with chapter navigation (Previous /
+Next buttons + "Chapter N of M" label), Ctrl+scroll and keyboard zoom, and per-session
+state retention.
 
-**Dependencies** — install at the start of Stage 11:
-```
-uv add ebooklib
-uv add PyQt6-WebEngine
-```
-On some Linux distributions an additional system package may be required for
-WebEngine (e.g. `qt6-webengine`). Confirm availability on Alma Linux 9 first.
+**Dependencies** — `ebooklib` (EPUB parsing) and `PyQt6-WebEngine` (rendering). Both
+are in `pyproject.toml`. On some Linux distributions an additional system package may
+be required for WebEngine (e.g. `qt6-webengine`).
 
-**Architecture** — `ebooklib` parses the EPUB (spine, chapter HTML, embedded assets);
-`QWebEngineView` renders chapters; a `QWebEngineUrlSchemeHandler` using the custom
-scheme `echofinder-epub://` serves embedded assets (images, CSS, fonts) from the
-in-memory book to the web view. Do not write extracted assets to disk.
+**Architecture** — `ebooklib` parses the EPUB spine; each spine item that is an
+`EpubHtml` instance becomes a navigable chapter. `QWebEngineView` renders chapter HTML.
+A module-level `_EpubSchemeHandler` singleton (installed once on
+`QWebEngineProfile.defaultProfile()`) serves embedded assets (images, CSS, fonts) via
+the custom scheme `echofinder-epub://book/<href>`, resolved from the in-memory book.
+Assets are never written to disk.
 
-`QWebEngineUrlScheme.registerScheme()` must be called before `QApplication()` is
-instantiated.
+**Scheme registration** — `QWebEngineUrlScheme.registerScheme()` must be called before
+`QApplication()` is instantiated. This is handled in `__main__.py`.
 
-**Optional dependency handling** — `PyQt6-WebEngine` is not always present (~200 MB).
-Guard the import in `epub_widget.py` with a `_WEBENGINE_AVAILABLE` flag. If absent,
-EPUB files fall back to the unsupported widget; the application must not crash.
+**Optional dependency guard** — both `PyQt6.QtWebEngineWidgets` and `ebooklib` are
+imported inside a `try/except ImportError` block. If either is absent,
+`_WEBENGINE_AVAILABLE` is `False` and `EpubPreviewWidget` is replaced by a no-op stub
+so the application never crashes on import. EPUB files fall back to the unsupported
+widget in that case.
 
-**File type resolver** — insert EPUB between PDF and unsupported in the precedence
-order. MIME type: `application/epub+zip`. Extension: `.epub`. Add `FileType.EPUB` to
-the enum in `models/file_node.py`.
+**Base URL for relative assets** — `setContent()` is called with a `base_url` of
+`echofinder-epub://book/<chapter-directory>/` so that relative `src` and `href`
+attributes in chapter HTML resolve correctly through the scheme handler.
 
-**Settled decisions (do not re-propose rejected alternatives)**
-- Rendering: `QWebEngineView` only. Stripping HTML for `TextPreviewWidget` was
-  rejected (discards all formatting).
-- Asset serving: URL scheme handler only. Writing to a temp directory was rejected
-  (unnecessary I/O, lifecycle complexity).
-- Scope: EPUB only. MOBI/AZW and other ebook formats are out of scope.
-- Session state: chapter index, scroll position (per chapter), and zoom level are
-  retained in memory for the session; not persisted to disk.
+**Session state** — chapter index, per-chapter scroll position, and zoom level are
+retained in memory (keyed by file path) for the session; not persisted to disk. Scroll
+position is saved via `window.scrollY` (JavaScript callback) before each chapter
+navigation and restored in `_on_load_finished` after the new page loads.
 
-**Open questions (do not block implementation)**
-- EPUB 3 JavaScript in chapter HTML: load as-is; only strip `<script>` tags if
-  navigation conflicts are observed in practice.
-- DRM-protected EPUBs: `ebooklib` will raise an exception; catch it and show the
-  unreadable file widget.
+**Zoom** — Ctrl+scroll wheel and `+`/`-` keys adjust `QWebEngineView.setZoomFactor()`
+in multiplicative `_ZOOM_STEP = 1.1` increments, clamped to `[0.5, 3.0]`. Ctrl+0
+resets to 1.0.
+
+**Error handling** — any exception from `ebooklib.epub.read_epub()` (including
+DRM-protected files) is caught, logged as a warning, and results in a blank view rather
+than a crash.
